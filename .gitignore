@@ -1,0 +1,107 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+.pnp
+.pnp.js
+
+# Environment variables - NEVER COMMIT THESE!
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.*.local
+*.env
+
+# Server uploads and user data
+server/uploads/
+uploads/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+server.log
+server/*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor directories and files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# Build output
+dist/
+build/
+.next/
+out/
+
+# Database files - NEVER COMMIT THESE!
+*.sql
+*.db
+*.sqlite
+*.sqlite3
+database_queries.sql
+migration_to_db_storage.sql
+insightai_*.sql
+
+# Backup files
+*.backup
+*.bak
+*-backup.js
+server/index-mysql-backup.js
+server/index-dataverse.js
+
+# Sensitive files and data
+user file log.xlsx
+*.xlsx
+*.xls
+!example*.xlsx
+!template*.xlsx
+
+# Azure/Dataverse credentials - NEVER COMMIT!
+*tenant*id*.txt
+*client*secret*.txt
+*credentials*.txt
+*config*.json
+!package.json
+!tsconfig.json
+
+# Documentation (remove from repo if contains sensitive info)
+DATAVERSE_*.md
+DATABASE_*.md
+MIGRATION_*.md
+*.backup.md
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# macOS
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+.directory
