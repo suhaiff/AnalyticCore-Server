@@ -7,12 +7,38 @@ const bodyParser = require('body-parser');
 const multer = require('multer');
 const fs = require('fs');
 const XLSX = require('xlsx');
-const dataverseService = require('./dataverseService');
+const supabaseService = require('./supabaseService');
 
 const app = express();
-const port = 3001;
+const port = process.env.PORT || 3001;
 
-app.use(cors());
+// CORS Configuration - Allow specific origins
+const allowedOrigins = [
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://localhost:5173',  // Vite dev server
+    'https://analyticcore-server.onrender.com',
+    'https://analytic-core.netlify.app',  // Netlify frontend
+    process.env.FRONTEND_URL,  // Environment variable for additional domains
+].filter(Boolean);  // Remove undefined values
+
+app.use(cors({
+    origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps, Postman, or curl)
+        if (!origin) return callback(null, true);
+
+        if (allowedOrigins.indexOf(origin) !== -1) {
+            callback(null, true);
+        } else {
+            console.log('CORS blocked origin:', origin);
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(bodyParser.json());
 
 // Ensure uploads directory exists
@@ -34,13 +60,13 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage: storage });
 
-console.log('Starting server with Dataverse integration...');
+console.log('Starting server with Supabase integration...');
 
 // Auth Endpoints
 app.post('/api/login', async (req, res) => {
     try {
         const { email, password } = req.body;
-        const user = await dataverseService.getUserByEmail(email);
+        const user = await supabaseService.getUserByEmail(email);
 
         if (user && user.password === password) {
             // Don't send password back
@@ -60,27 +86,23 @@ app.post('/api/signup', async (req, res) => {
         const { name, email, password } = req.body;
 
         // Check if user already exists
-        const existingUser = await dataverseService.getUserByEmail(email);
+        const existingUser = await supabaseService.getUserByEmail(email);
         if (existingUser) {
             return res.status(400).json({ error: 'Email already exists' });
         }
 
-        const newUser = await dataverseService.createUser(name, email, password, 'USER');
+        const newUser = await supabaseService.createUser(name, email, password, 'USER');
         res.json(newUser);
     } catch (error) {
         console.error('Signup error:', error);
-        if (error.response?.status === 400) {
-            res.status(400).json({ error: 'Email already exists' });
-        } else {
-            res.status(500).json({ error: error.message });
-        }
+        res.status(500).json({ error: error.message });
     }
 });
 
 // User Management (Admin)
 app.get('/api/users', async (req, res) => {
     try {
-        const users = await dataverseService.getUsers();
+        const users = await supabaseService.getUsers();
         res.json(users);
     } catch (error) {
         console.error('Get users error:', error);
@@ -91,7 +113,7 @@ app.get('/api/users', async (req, res) => {
 app.delete('/api/users/:id', async (req, res) => {
     try {
         const userId = parseInt(req.params.id);
-        await dataverseService.deleteUser(userId);
+        await supabaseService.deleteUser(userId);
         res.json({ message: 'User deleted successfully' });
     } catch (error) {
         console.error('Delete user error:', error);
@@ -109,7 +131,7 @@ app.post('/api/dashboards', async (req, res) => {
         }
 
         const { name, dataModel, chartConfigs } = dashboard;
-        const result = await dataverseService.createDashboard(userId, name, dataModel, chartConfigs);
+        const result = await supabaseService.createDashboard(userId, name, dataModel, chartConfigs);
         res.json(result);
     } catch (error) {
         console.error('Save dashboard error:', error);
@@ -120,7 +142,7 @@ app.post('/api/dashboards', async (req, res) => {
 app.get('/api/dashboards', async (req, res) => {
     try {
         const userId = parseInt(req.query.userId);
-        const dashboards = await dataverseService.getDashboardsByUser(userId);
+        const dashboards = await supabaseService.getDashboardsByUser(userId);
         res.json(dashboards);
     } catch (error) {
         console.error('Get dashboards error:', error);
@@ -131,7 +153,7 @@ app.get('/api/dashboards', async (req, res) => {
 app.delete('/api/dashboards/:id', async (req, res) => {
     try {
         const id = parseInt(req.params.id);
-        await dataverseService.deleteDashboard(id);
+        await supabaseService.deleteDashboard(id);
         res.json({ message: 'Dashboard deleted' });
     } catch (error) {
         console.error('Delete dashboard error:', error);
@@ -142,7 +164,7 @@ app.delete('/api/dashboards/:id', async (req, res) => {
 // Admin: Get All Dashboards
 app.get('/api/admin/dashboards', async (req, res) => {
     try {
-        const dashboards = await dataverseService.getAllDashboards();
+        const dashboards = await supabaseService.getAllDashboards();
         res.json(dashboards);
     } catch (error) {
         console.error('Get all dashboards error:', error);
@@ -175,8 +197,8 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
         console.log(`Processing file: ${originalname} with ${sheetCount} sheets`);
 
-        // 1. Create file record in Dataverse
-        const fileId = await dataverseService.createFile(
+        // 1. Create file record in Supabase
+        const fileId = await supabaseService.createFile(
             parseInt(userId),
             originalname,
             mimetype,
@@ -199,7 +221,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             console.log(`Processing sheet "${sheetName}": ${rowCount} rows, ${columnCount} columns`);
 
             // Create sheet record
-            const sheetId = await dataverseService.createSheet(
+            const sheetId = await supabaseService.createSheet(
                 fileId,
                 sheetName,
                 i,
@@ -209,12 +231,11 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
             console.log(`Created sheet record with ID: ${sheetId}`);
 
-            // Insert row data - we need to batch this due to Dataverse API limits
-            // Process in smaller batches to avoid timeouts
+            // Insert row data - process in smaller batches to avoid timeouts
             const batchSize = 100;
             for (let rowIndex = 0; rowIndex < sheetData.length; rowIndex++) {
                 const rowData = sheetData[rowIndex];
-                await dataverseService.createExcelData(sheetId, rowIndex, rowData);
+                await supabaseService.createExcelData(sheetId, rowIndex, rowData);
 
                 // Log progress for large files
                 if ((rowIndex + 1) % batchSize === 0) {
@@ -227,7 +248,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
         // 3. Log to file_upload_log
         const now = new Date();
-        await dataverseService.createFileUploadLog(
+        await supabaseService.createFileUploadLog(
             fileId,
             now.toISOString().split('T')[0],
             now.toTimeString().split(' ')[0],
@@ -255,7 +276,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
             const newUploadRow = {
                 'S.No': uploadsData.length + 1,
-                'Path': 'Dataverse',
+                'Path': 'Supabase',
                 'File Type': mimetype,
                 'File name': originalname,
                 'Uploaded date': now.toLocaleDateString(),
@@ -278,7 +299,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             sheetNames.forEach(sheetName => {
                 const newDetailRow = {
                     'S.No': fileDetailsData.length + 1,
-                    'Path': 'Dataverse',
+                    'Path': 'Supabase',
                     'File name': originalname,
                     'Sheet count': sheetCount,
                     'Sheet Name': sheetName
@@ -309,7 +330,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         }
 
         res.json({
-            message: 'File uploaded and data stored successfully in Dataverse',
+            message: 'File uploaded and data stored successfully in Supabase',
             file: {
                 id: fileId,
                 originalName: originalname,
@@ -324,7 +345,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         // Try to log the error
         try {
             const now = new Date();
-            await dataverseService.createFileUploadLog(
+            await supabaseService.createFileUploadLog(
                 0, // fileId might not exist yet
                 now.toISOString().split('T')[0],
                 now.toTimeString().split(' ')[0],
@@ -345,8 +366,8 @@ app.post('/api/log-config', async (req, res) => {
     try {
         const { fileName, columns, joinConfigs } = req.body;
 
-        // Log to Dataverse
-        await dataverseService.createDataConfigLog(fileName, columns, joinConfigs);
+        // Log to Supabase
+        await supabaseService.createDataConfigLog(fileName, columns, joinConfigs);
 
         // Also log to Excel file for backward compatibility
         const logFilePath = path.join(__dirname, '..', 'user file log.xlsx');
@@ -388,7 +409,7 @@ app.post('/api/log-config', async (req, res) => {
         }
 
         XLSX.writeFile(workbook, logFilePath);
-        console.log('Logged configuration to Excel and Dataverse');
+        console.log('Logged configuration to Excel and Supabase');
         res.json({ message: 'Configuration logged successfully' });
 
     } catch (err) {
@@ -400,7 +421,7 @@ app.post('/api/log-config', async (req, res) => {
 // Admin: Get All Uploads
 app.get('/api/admin/uploads', async (req, res) => {
     try {
-        const uploads = await dataverseService.getAllUploads();
+        const uploads = await supabaseService.getAllUploads();
         res.json(uploads);
     } catch (error) {
         console.error('Get all uploads error:', error);
@@ -408,11 +429,11 @@ app.get('/api/admin/uploads', async (req, res) => {
     }
 });
 
-// Get File Content (for Preview) - Now reads from Dataverse
+// Get File Content (for Preview) - Now reads from Supabase
 app.get('/api/uploads/:id/content', async (req, res) => {
     try {
         const id = parseInt(req.params.id);
-        const fileContent = await dataverseService.getFileContent(id);
+        const fileContent = await supabaseService.getFileContent(id);
 
         console.log(`Retrieved file content with ${fileContent.sheets.length} sheets`);
         res.json(fileContent);
@@ -427,8 +448,7 @@ app.get('/api/uploads/:id/content', async (req, res) => {
 });
 
 app.listen(port, () => {
-    console.log(`Server running on port ${port} with Microsoft Dataverse integration`);
-    console.log('Dataverse Configuration:');
-    console.log(`  Base URL: ${dataverseService.baseUrl}`);
-    console.log(`  API Path: ${dataverseService.apiPath}`);
+    console.log(`Server running on port ${port} with Supabase integration`);
+    console.log('Supabase Configuration:');
+    console.log(`  Project URL: ${supabaseService.supabaseUrl}`);
 });

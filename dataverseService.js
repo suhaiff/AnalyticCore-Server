@@ -196,7 +196,7 @@ class DataverseService {
 
     async getAllDashboards() {
         // Get all dashboards
-        const dashboardResponse = await this.makeRequest('GET', '/crc6f_hr_dashboardses?$select=crc6f_id,crc6f_name,crc6f_user_id,crc6f_data_model,crc6f_chart_configs,crc6f_created_at&$orderby=crc6f_created_at desc');
+        const dashboardResponse = await this.makeRequest('GET', '/crc6f_hr_dashboardses?$select=crc6f_id,crc6f_name,crc6f_Userid,crc6f_data_model,crc6f_chart_configs,crc6f_created_at&$orderby=crc6f_created_at desc');
 
         // Get all users to map user_id to user_name
         const userResponse = await this.makeRequest('GET', '/crc6f_hr_userses?$select=crc6f_id,crc6f_name,crc6f_email');
@@ -211,8 +211,8 @@ class DataverseService {
         return dashboardResponse.value.map(dashboard => ({
             id: dashboard.crc6f_id.toString(),
             name: dashboard.crc6f_name,
-            user_name: userMap[dashboard.crc6f_user_id]?.name || 'Unknown',
-            user_email: userMap[dashboard.crc6f_user_id]?.email || '',
+            user_name: userMap[dashboard.crc6f_Userid]?.name || 'Unknown',
+            user_email: userMap[dashboard.crc6f_Userid]?.email || '',
             date: new Date(dashboard.crc6f_created_at).toLocaleDateString(),
             dataModel: JSON.parse(dashboard.crc6f_data_model || '{}'),
             chartConfigs: JSON.parse(dashboard.crc6f_chart_configs || '[]')

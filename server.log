@@ -1,0 +1,39 @@
+
+> insightai-server@1.0.0 start
+> node index.js
+
+[dotenv@17.2.3] injecting env (7) from ../.env -- tip: 👥 sync secrets across teammates & machines: https://dotenvx.com/ops
+Starting server with Dataverse integration...
+Server running on port 3001 with Microsoft Dataverse integration
+Dataverse Configuration:
+  Base URL: https://orgdb7213a6.api.crm8.dynamics.com
+  API Path: /api/data/v9.2
+[Upload] Starting upload for User: 89a562d3-0fd4-f011-8544-7c1e523baf62, File: test_upload.xlsx, Size: 14
+Processing file: test_upload.xlsx with 1 sheets
+Successfully obtained Dataverse access token
+[Upload] File record created. ID: d18f985a-6fda-f011-8543-7c1e523c8b5f
+Processing sheet "Sheet1": 1 rows, 1 columns
+[Upload] Sheet "Sheet1" created. ID: d28f985a-6fda-f011-8543-7c1e523c8b5f
+Completed inserting all rows for sheet "Sheet1"
+Created upload log entry
+Logged upload to Excel: /home/Suhaif/Downloads/insightai/user file log.xlsx
+Deleted physical file: /home/Suhaif/Downloads/insightai/server/uploads/1765883229096-10628967-test_upload.xlsx
+[Upload] Starting upload for User: 89a562d3-0fd4-f011-8544-7c1e523baf62, File: complex_upload.xlsx, Size: 27310
+Processing file: complex_upload.xlsx with 1 sheets
+[Upload] File record created. ID: 9606d3a9-6fda-f011-8543-7c1e523c8b5f
+Processing sheet "Sheet1": 51 rows, 3 columns
+[Upload] Sheet "Sheet1" created. ID: 9706d3a9-6fda-f011-8543-7c1e523c8b5f
+Dataverse API Error (POST /crc6f_hr_excel_datas): {
+  "error": {
+    "code": "0x80044331",
+    "message": "A validation error occurred.  The length of the 'crc6f_row_data' attribute of the 'crc6f_hr_excel_data' entity exceeded the maximum allowed length of '100'."
+  }
+}
+[Upload] FAILED: Request failed with status code 400
+[Upload] Dataverse Error Details: {
+  "error": {
+    "code": "0x80044331",
+    "message": "A validation error occurred.  The length of the 'crc6f_row_data' attribute of the 'crc6f_hr_excel_data' entity exceeded the maximum allowed length of '100'."
+  }
+}
+Killed
