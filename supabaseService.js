@@ -73,7 +73,7 @@ class SupabaseService {
                 .single();
 
             if (error) throw error;
-            
+
             // Don't return password
             const { password: _, ...userWithoutPassword } = data;
             return userWithoutPassword;
@@ -124,7 +124,7 @@ class SupabaseService {
                 .single();
 
             if (error) throw error;
-            
+
             console.log('Dashboard created successfully:', data);
             return {
                 id: data.id,
@@ -145,7 +145,7 @@ class SupabaseService {
                 .order('created_at', { ascending: false });
 
             if (error) throw error;
-            
+
             return (data || []).map(dashboard => ({
                 id: dashboard.id.toString(),
                 name: dashboard.name,
@@ -205,7 +205,7 @@ class SupabaseService {
 
     // ==================== File Upload Management ====================
 
-    async createFile(userId, originalName, mimeType, fileSize, sheetCount) {
+    async createFile(userId, originalName, mimeType, fileSize, sheetCount, sourceInfo = null) {
         try {
             const { data, error } = await this.supabase
                 .from('uploaded_files')
@@ -216,6 +216,7 @@ class SupabaseService {
                         mime_type: mimeType,
                         file_size: fileSize,
                         sheet_count: sheetCount,
+                        source_info: sourceInfo,
                         created_at: new Date().toISOString(),
                         updated_at: new Date().toISOString()
                     }
@@ -429,6 +430,70 @@ class SupabaseService {
             if (error) throw error;
         } catch (error) {
             console.error('Error creating data config log:', error.message);
+            throw error;
+        }
+    }
+
+    async getFileById(fileId) {
+        try {
+            const { data, error } = await this.supabase
+                .from('uploaded_files')
+                .select('*')
+                .eq('id', fileId)
+                .single();
+
+            if (error) throw error;
+            return data;
+        } catch (error) {
+            console.error('Error fetching file by ID:', error.message);
+            throw error;
+        }
+    }
+
+    async updateFileData(fileId, sheets) {
+        try {
+            // 1. Get existing sheets to delete their data
+            const { data: existingSheets, error: fetchError } = await this.supabase
+                .from('excel_sheets')
+                .select('id')
+                .eq('file_id', fileId);
+
+            if (fetchError) throw fetchError;
+
+            // 2. Delete existing sheets (Cascade will handle excel_data)
+            if (existingSheets && existingSheets.length > 0) {
+                const { error: deleteError } = await this.supabase
+                    .from('excel_sheets')
+                    .delete()
+                    .eq('file_id', fileId);
+
+                if (deleteError) throw deleteError;
+            }
+
+            // 3. Insert new sheets and data
+            for (let i = 0; i < sheets.length; i++) {
+                const { name, data } = sheets[i];
+                const rowCount = data.length;
+                const columnCount = rowCount > 0 ? Math.max(...data.map(row => row.length)) : 0;
+
+                const sheetId = await this.createSheet(fileId, name, i, rowCount, columnCount);
+
+                // Insert in batches
+                const batchSize = 100;
+                for (let rowIndex = 0; rowIndex < data.length; rowIndex++) {
+                    await this.createExcelData(sheetId, rowIndex, data[rowIndex]);
+                }
+            }
+
+            // 4. Update updated_at
+            await this.supabase
+                .from('uploaded_files')
+                .update({ updated_at: new Date().toISOString() })
+                .eq('id', fileId);
+
+            return true;
+        } catch (error) {
+            console.error('Error updating file data:', error.message);
             throw error;
         }
     }

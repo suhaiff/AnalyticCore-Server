@@ -8,6 +8,7 @@ const multer = require('multer');
 const fs = require('fs');
 const XLSX = require('xlsx');
 const supabaseService = require('./supabaseService');
+const googleSheetsService = require('./googleSheetsService');
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -429,21 +430,121 @@ app.get('/api/admin/uploads', async (req, res) => {
     }
 });
 
-// Get File Content (for Preview) - Now reads from Supabase
-app.get('/api/uploads/:id/content', async (req, res) => {
+// Google Sheets Endpoints
+app.post('/api/google-sheets/metadata', async (req, res) => {
     try {
-        const id = parseInt(req.params.id);
-        const fileContent = await supabaseService.getFileContent(id);
+        const { url } = req.body;
+        if (!url) return res.status(400).json({ error: 'Missing Google Sheet URL' });
 
-        console.log(`Retrieved file content with ${fileContent.sheets.length} sheets`);
-        res.json(fileContent);
+        const spreadsheetId = googleSheetsService.extractSpreadsheetId(url);
+        if (!spreadsheetId) return res.status(400).json({ error: 'Invalid Google Sheet URL' });
+
+        const metadata = await googleSheetsService.getMetadata(spreadsheetId);
+        res.json({ spreadsheetId, ...metadata });
     } catch (error) {
-        console.error('Get file content error:', error);
-        if (error.message === 'File not found') {
-            res.status(404).json({ error: 'File not found' });
-        } else {
-            res.status(500).json({ error: 'Failed to retrieve file content' });
+        console.error('Google Sheets metadata error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post('/api/google-sheets/import', async (req, res) => {
+    try {
+        const { userId, spreadsheetId, sheetName, range, title } = req.body;
+
+        if (!userId || !spreadsheetId || !sheetName) {
+            return res.status(400).json({ error: 'Missing required parameters' });
         }
+
+        console.log(`Importing Google Sheet: ${spreadsheetId}, Sheet: ${sheetName}`);
+
+        // 1. Fetch data from Google Sheets
+        const data = await googleSheetsService.getSheetData(spreadsheetId, sheetName, range);
+        if (!data || data.length === 0) {
+            return res.status(400).json({ error: 'The selected sheet or range is empty.' });
+        }
+
+        const rowCount = data.length;
+        const columnCount = data[0].length;
+
+        // 2. Create file record in Supabase
+        const sourceInfo = {
+            type: 'google_sheet',
+            spreadsheetId,
+            sheetName,
+            range: range || 'A1:Z5000',
+            refreshMode: 'manual'
+        };
+
+        const fileId = await supabaseService.createFile(
+            parseInt(userId),
+            title || `GS: ${sheetName}`,
+            'application/vnd.google-apps.spreadsheet',
+            0, // Size not easily available
+            1, // We import one sheet at a time for now
+            sourceInfo
+        );
+
+        // 3. Create sheet record
+        const sheetId = await supabaseService.createSheet(
+            fileId,
+            sheetName,
+            0,
+            rowCount,
+            columnCount
+        );
+
+        // 4. Insert row data in batches
+        const batchSize = 100;
+        for (let rowIndex = 0; rowIndex < data.length; rowIndex++) {
+            await supabaseService.createExcelData(sheetId, rowIndex, data[rowIndex]);
+            if ((rowIndex + 1) % batchSize === 0) {
+                console.log(`  Inserted ${rowIndex + 1}/${data.length} rows for Google Sheet`);
+            }
+        }
+
+        res.json({
+            message: 'Google Sheet imported successfully',
+            fileId,
+            sheetName,
+            rowCount,
+            data
+        });
+    } catch (error) {
+        console.error('Google Sheets import error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post('/api/google-sheets/refresh/:fileId', async (req, res) => {
+    try {
+        const fileId = parseInt(req.params.fileId);
+        const file = await supabaseService.getFileById(fileId);
+
+        if (!file || !file.source_info || file.source_info.type !== 'google_sheet') {
+            return res.status(400).json({ error: 'File is not a Google Sheet or missing source info' });
+        }
+
+        const { spreadsheetId, sheetName, range } = file.source_info;
+        console.log(`Refreshing Google Sheet: ${spreadsheetId}, Sheet: ${sheetName}`);
+
+        // 1. Fetch fresh data
+        const data = await googleSheetsService.getSheetData(spreadsheetId, sheetName, range);
+        if (!data || data.length === 0) {
+            return res.status(400).json({ error: 'The Google Sheet is now empty.' });
+        }
+
+        // 2. Update data in Supabase
+        await supabaseService.updateFileData(fileId, [{ name: sheetName, data }]);
+
+        res.json({
+            message: 'Google Sheet refreshed successfully',
+            rowCount: data.length,
+            updatedAt: new Date().toISOString(),
+            data
+        });
+    } catch (error) {
+        console.error('Google Sheets refresh error:', error.message);
+        res.status(500).json({ error: error.message });
     }
 });
 
@@ -452,3 +553,6 @@ app.listen(port, () => {
     console.log('Supabase Configuration:');
     console.log(`  Project URL: ${supabaseService.supabaseUrl}`);
 });
+
+
+
