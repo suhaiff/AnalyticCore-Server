@@ -389,7 +389,18 @@ class SupabaseService {
 
                 if (dataError) throw dataError;
 
-                const sheetData = (excelData || []).map(row => row.row_data);
+                const sheetData = (excelData || []).map(row => {
+                    // Robust check: row_data might be stored as a stringified JSON if column type is text
+                    if (typeof row.row_data === 'string') {
+                        try {
+                            return JSON.parse(row.row_data);
+                        } catch (e) {
+                            console.error('Failed to parse row_data string:', row.row_data);
+                            return [];
+                        }
+                    }
+                    return row.row_data || [];
+                });
 
                 sheets.push({
                     name: sheet.sheet_name,
