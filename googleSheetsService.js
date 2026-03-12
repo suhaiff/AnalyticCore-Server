@@ -64,6 +64,12 @@ class GoogleSheetsService {
             };
         } catch (error) {
             console.error('Error fetching Google Sheet metadata:', error.message);
+
+            // Handle specific Google API error for Excel files in Drive
+            if (error.message && error.message.includes('This operation is not supported for this document')) {
+                throw new Error('This document appears to be an Excel file (.xlsx) stored in Google Drive. To use it with the Google Sheets API, please open the file in Google Sheets and go to "File" > "Save as Google Sheets".');
+            }
+
             if (error.code === 403) {
                 throw new Error('Access denied. Please ensure the Google Sheet is shared with the service account email: ' + this.clientEmail);
             }
@@ -91,6 +97,11 @@ class GoogleSheetsService {
             return response.data.values || [];
         } catch (error) {
             console.error('Error fetching Google Sheet data:', error.message);
+
+            if (error.message && error.message.includes('This operation is not supported for this document')) {
+                throw new Error('This document is an Excel file. Please convert it to Google Sheets format using "File" > "Save as Google Sheets" in the Google Sheets editor.');
+            }
+
             throw error;
         }
     }

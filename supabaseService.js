@@ -284,6 +284,28 @@ class SupabaseService {
         }
     }
 
+    async createExcelDataBatch(sheetId, rows) {
+        try {
+            // rows is an array of {rowIndex, rowData}
+            const insertData = rows.map(row => ({
+                sheet_id: sheetId,
+                row_index: row.rowIndex,
+                row_data: row.rowData,
+                created_at: new Date().toISOString()
+            }));
+
+            const { error } = await this.supabase
+                .from('excel_data')
+                .insert(insertData);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error batch creating excel data:', error.message);
+            throw error;
+        }
+    }
+
     async createFileUploadLog(fileId, uploadDate, uploadTime, filePath, status, errorMessage = null) {
         try {
             const logData = {
@@ -396,7 +418,18 @@ class SupabaseService {
 
                 if (dataError) throw dataError;
 
-                const sheetData = (excelData || []).map(row => row.row_data);
+                const sheetData = (excelData || []).map(row => {
+                    // Robust check: row_data might be stored as a stringified JSON if column type is text
+                    if (typeof row.row_data === 'string') {
+                        try {
+                            return JSON.parse(row.row_data);
+                        } catch (e) {
+                            console.error('Failed to parse row_data string:', row.row_data);
+                            return [];
+                        }
+                    }
+                    return row.row_data || [];
+                });
 
                 sheets.push({
                     name: sheet.sheet_name,

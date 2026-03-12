@@ -96,7 +96,8 @@ class SharePointOAuthService {
             redirect_uri: this.redirectUri,
             response_mode: 'query',
             scope: 'User.Read Sites.Read.All offline_access',  // Delegated permissions
-            state: stateParam
+            state: stateParam,
+            prompt: 'select_account' // Force Microsoft to show the account picker for privacy
         });
 
         return `${authEndpoint}?${params.toString()}`;
