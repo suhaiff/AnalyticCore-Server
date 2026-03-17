@@ -21,7 +21,12 @@ const port = process.env.PORT || 3001;
 const allowedOrigins = [
     'http://localhost:3000',
     'http://localhost:3001',
+    'http://localhost:3002',  // Current frontend port
     'http://localhost:5173',  // Vite dev server
+    'http://192.168.0.101:3000',  // Added network access URL
+    'http://192.168.0.102:3000',  // Network access URL
+    'http://192.168.1.5:3000',  // Current network access URL
+    'http://192.168.1.5:3001',  // Backend network URL
     'https://analyticcore-server.onrender.com',
     'http://139.59.32.39',  // Digital Ocean Droplet
     'http://139.59.32.39:3001',  // Digital Ocean Droplet with port
@@ -592,23 +597,48 @@ app.post('/api/google-sheets/refresh/:fileId', async (req, res) => {
             return res.status(400).json({ error: 'File is not a Google Sheet or missing source info' });
         }
 
-        const { spreadsheetId, sheetName, range } = file.source_info;
-        console.log(`Refreshing Google Sheet: ${spreadsheetId}, Sheet: ${sheetName}`);
+        const { spreadsheetId, sheetName, sheets, range } = file.source_info;
+        
+        const targetSheets = sheets || (sheetName ? [sheetName] : []);
+        if (targetSheets.length === 0) {
+            return res.status(400).json({ error: 'No sheets configured for this file' });
+        }
 
-        // 1. Fetch fresh data
-        const data = await googleSheetsService.getSheetData(spreadsheetId, sheetName, range);
-        if (!data || data.length === 0) {
-            return res.status(400).json({ error: 'The Google Sheet is now empty.' });
+        const updatedSheets = [];
+        let firstSheetData = null;
+
+        for (const sheet of targetSheets) {
+            console.log(`[REFRESH] Fetching sheet: "${sheet}" from Spreadsheet: ${spreadsheetId}`);
+            try {
+                const data = await googleSheetsService.getSheetData(spreadsheetId, sheet, range);
+                console.log(`[REFRESH] Successfully fetched "${sheet}": ${data ? data.length : 0} rows`);
+                if (data && data.length > 0) {
+                    updatedSheets.push({ name: sheet, data });
+                    if (!firstSheetData) firstSheetData = data;
+                } else {
+                    console.warn(`[REFRESH] Sheet "${sheet}" returned empty data`);
+                }
+            } catch (sheetError) {
+                console.error(`[REFRESH] Error fetching sheet "${sheet}":`, sheetError.message);
+                // Continue with other sheets if one fails, or re-throw? 
+                // Let's re-throw to be safe and notify user, since partial refresh might be misleading.
+                throw sheetError;
+            }
+        }
+
+        if (updatedSheets.length === 0) {
+            return res.status(400).json({ error: 'The Google Sheets are now empty.' });
         }
 
         // 2. Update data in Supabase
-        await supabaseService.updateFileData(fileId, [{ name: sheetName, data }]);
+        await supabaseService.updateFileData(fileId, updatedSheets);
 
         res.json({
             message: 'Google Sheet refreshed successfully',
-            rowCount: data.length,
+            rowCount: firstSheetData ? firstSheetData.length : 0,
             updatedAt: new Date().toISOString(),
-            data
+            sheets: updatedSheets,   // ← Full sheets array (matches import response shape)
+            data: firstSheetData     // ← Keep for backward compatibility
         });
     } catch (error) {
         console.error('Google Sheets refresh error:', error.message);
