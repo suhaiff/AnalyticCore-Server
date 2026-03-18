@@ -325,10 +325,14 @@ class SupabaseService {
                 .from('file_upload_logs')
                 .insert([logData]);
 
-            if (error) throw error;
+            if (error) {
+                console.warn('⚠️ Supabase logging failed (database level):', error.message);
+                return false;
+            }
+            return true;
         } catch (error) {
-            console.error('Error creating upload log:', error.message);
-            throw error;
+            console.warn('⚠️ Supabase logging failed (connection level): Check your network or project credentials. Error:', error.message);
+            return false;
         }
     }
 
@@ -467,10 +471,14 @@ class SupabaseService {
                     }
                 ]);
 
-            if (error) throw error;
+            if (error) {
+                console.warn('⚠️ Supabase logging failed (database level):', error.message);
+                return false;
+            }
+            return true;
         } catch (error) {
-            console.error('Error creating data config log:', error.message);
-            throw error;
+            console.warn('⚠️ Supabase logging failed (connection level): Check your network or project credentials. Error:', error.message);
+            return false;
         }
     }
 
