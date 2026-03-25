@@ -142,8 +142,8 @@ app.post('/api/dashboards', async (req, res) => {
             return res.status(400).json({ error: 'Missing dashboard data' });
         }
 
-        const { name, dataModel, chartConfigs } = dashboard;
-        const result = await supabaseService.createDashboard(userId, name, dataModel, chartConfigs);
+        const { name, dataModel, chartConfigs, sections, filterColumns } = dashboard;
+        const result = await supabaseService.createDashboard(userId, name, dataModel, chartConfigs, sections, filterColumns);
         res.json(result);
     } catch (error) {
         console.error('Save dashboard error:', error);

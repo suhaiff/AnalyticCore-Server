@@ -107,14 +107,24 @@ class SupabaseService {
 
     // ==================== Dashboard Management ====================
 
-    async createDashboard(userId, name, dataModel, chartConfigs) {
+    async createDashboard(userId, name, dataModel, chartConfigs, sections = null, filterColumns = null) {
         try {
             console.log('Creating dashboard with params:', {
                 userId,
                 name,
                 dataModelType: typeof dataModel,
-                chartConfigsType: typeof chartConfigs
+                chartConfigsType: typeof chartConfigs,
+                sectionsCount: sections ? sections.length : 0,
+                filterColumnsCount: filterColumns ? filterColumns.length : 0
             });
+
+            // Store sections and filterColumns alongside chartConfigs in the JSONB column
+            // This avoids needing a database migration to add new columns
+            const chartConfigsWrapper = {
+                charts: chartConfigs,
+                sections: sections || [],
+                filterColumns: filterColumns || []
+            };
 
             const { data, error } = await this.supabase
                 .from('dashboards')
@@ -123,7 +133,7 @@ class SupabaseService {
                         user_id: userId,
                         name,
                         data_model: dataModel,
-                        chart_configs: chartConfigs,
+                        chart_configs: chartConfigsWrapper,
                         created_at: new Date().toISOString()
                     }
                 ])
@@ -153,13 +163,33 @@ class SupabaseService {
 
             if (error) throw error;
 
-            return (data || []).map(dashboard => ({
-                id: dashboard.id.toString(),
-                name: dashboard.name,
-                date: new Date(dashboard.created_at).toLocaleDateString(),
-                dataModel: dashboard.data_model || {},
-                chartConfigs: dashboard.chart_configs || []
-            }));
+            return (data || []).map(dashboard => {
+                // Handle both old format (plain array) and new format (wrapper object)
+                const raw = dashboard.chart_configs;
+                let chartConfigs, sections, filterColumns;
+
+                if (raw && !Array.isArray(raw) && raw.charts) {
+                    // New wrapper format
+                    chartConfigs = raw.charts || [];
+                    sections = raw.sections || [];
+                    filterColumns = raw.filterColumns || [];
+                } else {
+                    // Legacy format: chart_configs is a plain array
+                    chartConfigs = raw || [];
+                    sections = [];
+                    filterColumns = [];
+                }
+
+                return {
+                    id: dashboard.id.toString(),
+                    name: dashboard.name,
+                    date: new Date(dashboard.created_at).toLocaleDateString(),
+                    dataModel: dashboard.data_model || {},
+                    chartConfigs,
+                    sections,
+                    filterColumns
+                };
+            });
         } catch (error) {
             console.error('Error fetching dashboards by user:', error.message);
             throw error;
@@ -179,16 +209,33 @@ class SupabaseService {
 
             if (error) throw error;
 
-            return (data || []).map(dashboard => ({
-                id: dashboard.id.toString(),
-                name: dashboard.name,
-                user_id: dashboard.user_id,
-                user_name: dashboard.users?.name || 'Unknown',
-                user_email: dashboard.users?.email || '',
-                date: new Date(dashboard.created_at).toLocaleDateString(),
-                dataModel: dashboard.data_model || {},
-                chartConfigs: dashboard.chart_configs || []
-            }));
+            return (data || []).map(dashboard => {
+                const raw = dashboard.chart_configs;
+                let chartConfigs, sections, filterColumns;
+
+                if (raw && !Array.isArray(raw) && raw.charts) {
+                    chartConfigs = raw.charts || [];
+                    sections = raw.sections || [];
+                    filterColumns = raw.filterColumns || [];
+                } else {
+                    chartConfigs = raw || [];
+                    sections = [];
+                    filterColumns = [];
+                }
+
+                return {
+                    id: dashboard.id.toString(),
+                    name: dashboard.name,
+                    user_id: dashboard.user_id,
+                    user_name: dashboard.users?.name || 'Unknown',
+                    user_email: dashboard.users?.email || '',
+                    date: new Date(dashboard.created_at).toLocaleDateString(),
+                    dataModel: dashboard.data_model || {},
+                    chartConfigs,
+                    sections,
+                    filterColumns
+                };
+            });
         } catch (error) {
             console.error('Error fetching all dashboards:', error.message);
             throw error;
