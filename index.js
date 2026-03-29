@@ -95,7 +95,7 @@ app.post('/api/login', async (req, res) => {
 
 app.post('/api/signup', async (req, res) => {
     try {
-        const { name, email, password } = req.body;
+        const { name, email, password, phone, company, job_title } = req.body;
 
         // Check if user already exists
         const existingUser = await supabaseService.getUserByEmail(email);
@@ -103,7 +103,7 @@ app.post('/api/signup', async (req, res) => {
             return res.status(400).json({ error: 'Email already exists' });
         }
 
-        const newUser = await supabaseService.createUser(name, email, password, 'USER');
+        const newUser = await supabaseService.createUser(name, email, password, 'USER', phone, company, job_title);
         res.json(newUser);
     } catch (error) {
         console.error('Signup error:', error);

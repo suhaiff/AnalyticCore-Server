@@ -63,7 +63,7 @@ class SupabaseService {
         }
     }
 
-    async createUser(name, email, password, role = 'USER') {
+    async createUser(name, email, password, role = 'USER', phone = null, company = null, job_title = null) {
         try {
             const { data, error } = await this.supabase
                 .from('users')
@@ -73,6 +73,9 @@ class SupabaseService {
                         email,
                         password, // In production, use bcrypt to hash passwords!
                         role,
+                        phone,
+                        company,
+                        job_title,
                         created_at: new Date().toISOString()
                     }
                 ])
