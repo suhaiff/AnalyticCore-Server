@@ -1,5 +1,5 @@
 const path = require('path');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const express = require('express');
 const cors = require('cors');
@@ -58,6 +58,12 @@ const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir);
 }
+ 
+// Global Request Logger Middleware
+app.use((req, res, next) => {
+    console.log(`📡 [Incoming Request] ${req.method} ${req.url}`);
+    next();
+});
 
 // Configure Multer
 const storage = multer.diskStorage({
@@ -95,7 +101,7 @@ app.post('/api/login', async (req, res) => {
 
 app.post('/api/signup', async (req, res) => {
     try {
-        const { name, email, password, phone, company, job_title } = req.body;
+        const { name, email, password, phone, company, job_title, domain } = req.body;
 
         // Check if user already exists
         const existingUser = await supabaseService.getUserByEmail(email);
@@ -103,7 +109,7 @@ app.post('/api/signup', async (req, res) => {
             return res.status(400).json({ error: 'Email already exists' });
         }
 
-        const newUser = await supabaseService.createUser(name, email, password, 'USER', phone, company, job_title);
+        const newUser = await supabaseService.createUser(name, email, password, 'USER', phone, company, job_title, domain);
         res.json(newUser);
     } catch (error) {
         console.error('Signup error:', error);
@@ -148,6 +154,29 @@ app.post('/api/dashboards', async (req, res) => {
     } catch (error) {
         console.error('Save dashboard error:', error);
         res.status(500).json({ error: error.message });
+    }
+});
+
+app.put('/api/dashboards/:id', async (req, res) => {
+    try {
+        const { id: rawId } = req.params;
+        const id = parseInt(rawId);
+        const { dashboard } = req.body;
+
+        console.log('🔄 Attemping to update dashboard:', { id, rawId, name: dashboard?.name });
+
+        if (!dashboard) {
+            console.error('❌ Update failed: Missing dashboard data');
+            return res.status(400).json({ error: 'Missing dashboard data' });
+        }
+
+        const { name, dataModel, chartConfigs, sections, filterColumns } = dashboard;
+        const result = await supabaseService.updateDashboard(id, name, dataModel, chartConfigs, sections, filterColumns);
+        console.log('✅ Dashboard updated successfully:', id);
+        res.json(result);
+    } catch (error) {
+        console.error('❌ Update dashboard error:', error);
+        res.status(500).json({ error: error.message || 'Unknown server error during update' });
     }
 });
 

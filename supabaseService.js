@@ -63,7 +63,7 @@ class SupabaseService {
         }
     }
 
-    async createUser(name, email, password, role = 'USER', phone = null, company = null, job_title = null) {
+    async createUser(name, email, password, role = 'USER', phone = null, company = null, job_title = null, domain = null) {
         try {
             const { data, error } = await this.supabase
                 .from('users')
@@ -76,6 +76,7 @@ class SupabaseService {
                         phone,
                         company,
                         job_title,
+                        domain,
                         created_at: new Date().toISOString()
                     }
                 ])
@@ -152,6 +153,33 @@ class SupabaseService {
             };
         } catch (error) {
             console.error('Error creating dashboard:', error.message);
+            throw error;
+        }
+    }
+
+    async updateDashboard(dashboardId, name, dataModel, chartConfigs, sections = null, filterColumns = null) {
+        try {
+            const chartConfigsWrapper = {
+                charts: chartConfigs,
+                sections: sections || [],
+                filterColumns: filterColumns || []
+            };
+
+            const { data, error } = await this.supabase
+                .from('dashboards')
+                .update({
+                    name,
+                    data_model: dataModel,
+                    chart_configs: chartConfigsWrapper
+                })
+                .eq('id', dashboardId)
+                .select()
+                .single();
+
+            if (error) throw error;
+            return data;
+        } catch (error) {
+            console.error('Error updating dashboard:', error.message);
             throw error;
         }
     }
