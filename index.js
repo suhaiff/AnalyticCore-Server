@@ -80,6 +80,15 @@ const upload = multer({ storage: storage });
 
 console.log('Starting server with Supabase integration...');
 
+app.get('/api/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        version: '1.0.3-dashboard-overwrite-fix',
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString()
+    });
+});
+
 // Auth Endpoints
 app.post('/api/login', async (req, res) => {
     try {
@@ -144,16 +153,47 @@ app.post('/api/dashboards', async (req, res) => {
     try {
         const { userId, dashboard } = req.body;
 
+        console.log('💾 Received save dashboard request:', {
+            userId,
+            dashboardName: dashboard?.name,
+            hasDataModel: !!dashboard?.dataModel,
+            chartConfigsCount: dashboard?.chartConfigs?.length,
+            sectionsCount: dashboard?.sections?.length,
+            filterColumnsCount: dashboard?.filterColumns?.length
+        });
+
         if (!dashboard) {
+            console.error('❌ Missing dashboard data in request body');
             return res.status(400).json({ error: 'Missing dashboard data' });
         }
 
+        if (!userId) {
+            console.error('❌ Missing userId in request body');
+            return res.status(400).json({ error: 'Missing userId' });
+        }
+
         const { name, dataModel, chartConfigs, sections, filterColumns } = dashboard;
+        
+        if (!name || !dataModel || !chartConfigs) {
+            console.error('❌ Missing required dashboard fields:', { hasName: !!name, hasDataModel: !!dataModel, hasChartConfigs: !!chartConfigs });
+            return res.status(400).json({ error: 'Missing required dashboard fields (name, dataModel, or chartConfigs)' });
+        }
+
+        console.log('✅ Validation passed, calling createDashboard...');
         const result = await supabaseService.createDashboard(userId, name, dataModel, chartConfigs, sections, filterColumns);
+        console.log('✅ Dashboard created successfully:', result);
         res.json(result);
     } catch (error) {
-        console.error('Save dashboard error:', error);
-        res.status(500).json({ error: error.message });
+        console.error('❌ Save dashboard error:', {
+            message: error.message,
+            stack: error.stack,
+            name: error.name,
+            code: error.code
+        });
+        res.status(500).json({ 
+            error: error.message || 'Unknown error occurred',
+            details: error.code || error.name
+        });
     }
 });
 
@@ -1638,6 +1678,104 @@ app.post('/api/sql-db/refresh/:fileId', async (req, res) => {
     }
 });
 
+// ============================================
+// Admin: API Error Log Endpoints
+// ============================================
+
+/**
+ * Report an API key error (called from frontend when Gemini calls fail)
+ */
+app.post('/api/admin/api-errors', async (req, res) => {
+    try {
+        const { error_type, error_message, source, key_index, user_id, user_email } = req.body;
+
+        if (!error_type || !error_message || !source) {
+            return res.status(400).json({ error: 'Missing required fields: error_type, error_message, source' });
+        }
+
+        await supabaseService.createApiErrorLog({
+            error_type,
+            error_message,
+            source,
+            key_index,
+            user_id,
+            user_email
+        });
+
+        console.log(`⚠️ [API Error Logged] ${error_type} in ${source}: ${error_message.substring(0, 100)}`);
+        res.json({ message: 'Error logged successfully' });
+    } catch (error) {
+        console.error('Error logging API error:', error.message);
+        // Still return 200 - error logging should not fail the client
+        res.json({ message: 'Error logging attempted' });
+    }
+});
+
+/**
+ * Get all API error logs (admin)
+ */
+app.get('/api/admin/api-errors', async (req, res) => {
+    try {
+        const errors = await supabaseService.getApiErrorLogs();
+        res.json(errors);
+    } catch (error) {
+        console.error('Get API errors error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * Get unresolved API error count (for notification badge)
+ */
+app.get('/api/admin/api-errors/count', async (req, res) => {
+    try {
+        const count = await supabaseService.getUnresolvedApiErrorCount();
+        res.json({ count });
+    } catch (error) {
+        console.error('Get API error count error:', error.message);
+        res.json({ count: 0 });
+    }
+});
+
+/**
+ * Resolve a specific API error
+ */
+app.put('/api/admin/api-errors/:id/resolve', async (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        await supabaseService.resolveApiError(id);
+        res.json({ message: 'Error resolved' });
+    } catch (error) {
+        console.error('Resolve API error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * Resolve all API errors
+ */
+app.put('/api/admin/api-errors/resolve-all', async (req, res) => {
+    try {
+        await supabaseService.resolveAllApiErrors();
+        res.json({ message: 'All errors resolved' });
+    } catch (error) {
+        console.error('Resolve all API errors:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * Clear resolved API errors
+ */
+app.delete('/api/admin/api-errors/resolved', async (req, res) => {
+    try {
+        await supabaseService.clearResolvedApiErrors();
+        res.json({ message: 'Resolved errors cleared' });
+    } catch (error) {
+        console.error('Clear resolved API errors:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
 
 app.listen(port, () => {
     console.log(`Server running on port ${port} with Supabase integration`);

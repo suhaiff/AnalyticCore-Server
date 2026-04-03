@@ -113,11 +113,14 @@ class SupabaseService {
 
     async createDashboard(userId, name, dataModel, chartConfigs, sections = null, filterColumns = null) {
         try {
-            console.log('Creating dashboard with params:', {
+            console.log('📊 Creating dashboard:', {
                 userId,
                 name,
                 dataModelType: typeof dataModel,
+                dataModelSize: JSON.stringify(dataModel).length,
                 chartConfigsType: typeof chartConfigs,
+                chartConfigsCount: chartConfigs?.length,
+                chartConfigsSize: JSON.stringify(chartConfigs).length,
                 sectionsCount: sections ? sections.length : 0,
                 filterColumnsCount: filterColumns ? filterColumns.length : 0
             });
@@ -130,29 +133,49 @@ class SupabaseService {
                 filterColumns: filterColumns || []
             };
 
+            const payload = {
+                user_id: userId,
+                name,
+                data_model: dataModel,
+                chart_configs: chartConfigsWrapper,
+                created_at: new Date().toISOString()
+            };
+
+            const payloadSize = JSON.stringify(payload).length;
+            console.log(`📦 Payload size: ${(payloadSize / 1024).toFixed(2)} KB`);
+
+            if (payloadSize > 5 * 1024 * 1024) { // 5MB limit
+                console.error('❌ Payload too large:', payloadSize);
+                throw new Error(`Dashboard data too large (${(payloadSize / 1024 / 1024).toFixed(2)} MB). Please reduce the amount of data.`);
+            }
+
             const { data, error } = await this.supabase
                 .from('dashboards')
-                .insert([
-                    {
-                        user_id: userId,
-                        name,
-                        data_model: dataModel,
-                        chart_configs: chartConfigsWrapper,
-                        created_at: new Date().toISOString()
-                    }
-                ])
+                .insert([payload])
                 .select()
                 .single();
 
-            if (error) throw error;
+            if (error) {
+                console.error('❌ Supabase error:', {
+                    message: error.message,
+                    details: error.details,
+                    hint: error.hint,
+                    code: error.code
+                });
+                throw new Error(`Database error: ${error.message}${error.hint ? ` (${error.hint})` : ''}`);
+            }
 
-            console.log('Dashboard created successfully:', data);
+            console.log('✅ Dashboard created successfully:', { id: data.id, name: data.name });
             return {
                 id: data.id,
                 message: 'Dashboard saved'
             };
         } catch (error) {
-            console.error('Error creating dashboard:', error.message);
+            console.error('❌ Error creating dashboard:', {
+                message: error.message,
+                stack: error.stack,
+                name: error.name
+            });
             throw error;
         }
     }
@@ -620,6 +643,107 @@ class SupabaseService {
             return true;
         } catch (error) {
             console.error('Error updating file data:', error.message);
+            throw error;
+        }
+    }
+    // ==================== API Error Logs ====================
+
+    async createApiErrorLog(errorData) {
+        try {
+            const { error } = await this.supabase
+                .from('api_error_logs')
+                .insert([{
+                    error_type: errorData.error_type,
+                    error_message: errorData.error_message,
+                    source: errorData.source,
+                    key_index: errorData.key_index || null,
+                    user_id: errorData.user_id || null,
+                    user_email: errorData.user_email || null,
+                    resolved: false,
+                    created_at: new Date().toISOString()
+                }]);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error creating API error log:', error.message);
+            // Don't throw - error logging should never break the application
+            return false;
+        }
+    }
+
+    async getApiErrorLogs() {
+        try {
+            const { data, error } = await this.supabase
+                .from('api_error_logs')
+                .select('*')
+                .order('created_at', { ascending: false })
+                .limit(100);
+
+            if (error) throw error;
+            return data || [];
+        } catch (error) {
+            console.error('Error fetching API error logs:', error.message);
+            return [];
+        }
+    }
+
+    async getUnresolvedApiErrorCount() {
+        try {
+            const { count, error } = await this.supabase
+                .from('api_error_logs')
+                .select('*', { count: 'exact', head: true })
+                .eq('resolved', false);
+
+            if (error) throw error;
+            return count || 0;
+        } catch (error) {
+            console.error('Error fetching unresolved error count:', error.message);
+            return 0;
+        }
+    }
+
+    async resolveApiError(id) {
+        try {
+            const { error } = await this.supabase
+                .from('api_error_logs')
+                .update({ resolved: true })
+                .eq('id', id);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error resolving API error:', error.message);
+            throw error;
+        }
+    }
+
+    async resolveAllApiErrors() {
+        try {
+            const { error } = await this.supabase
+                .from('api_error_logs')
+                .update({ resolved: true })
+                .eq('resolved', false);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error resolving all API errors:', error.message);
+            throw error;
+        }
+    }
+
+    async clearResolvedApiErrors() {
+        try {
+            const { error } = await this.supabase
+                .from('api_error_logs')
+                .delete()
+                .eq('resolved', true);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error clearing resolved API errors:', error.message);
             throw error;
         }
     }
