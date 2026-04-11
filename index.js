@@ -159,7 +159,9 @@ app.post('/api/dashboards', async (req, res) => {
             hasDataModel: !!dashboard?.dataModel,
             chartConfigsCount: dashboard?.chartConfigs?.length,
             sectionsCount: dashboard?.sections?.length,
-            filterColumnsCount: dashboard?.filterColumns?.length
+            filterColumnsCount: dashboard?.filterColumns?.length,
+            folderId: dashboard?.folderId,
+            isWorkspace: dashboard?.isWorkspace
         });
 
         if (!dashboard) {
@@ -172,7 +174,7 @@ app.post('/api/dashboards', async (req, res) => {
             return res.status(400).json({ error: 'Missing userId' });
         }
 
-        const { name, dataModel, chartConfigs, sections, filterColumns } = dashboard;
+        const { name, dataModel, chartConfigs, sections, filterColumns, folderId, isWorkspace } = dashboard;
         
         if (!name || !dataModel || !chartConfigs) {
             console.error('❌ Missing required dashboard fields:', { hasName: !!name, hasDataModel: !!dataModel, hasChartConfigs: !!chartConfigs });
@@ -180,7 +182,7 @@ app.post('/api/dashboards', async (req, res) => {
         }
 
         console.log('✅ Validation passed, calling createDashboard...');
-        const result = await supabaseService.createDashboard(userId, name, dataModel, chartConfigs, sections, filterColumns);
+        const result = await supabaseService.createDashboard(userId, name, dataModel, chartConfigs, sections, filterColumns, folderId, isWorkspace);
         console.log('✅ Dashboard created successfully:', result);
         res.json(result);
     } catch (error) {
@@ -210,8 +212,8 @@ app.put('/api/dashboards/:id', async (req, res) => {
             return res.status(400).json({ error: 'Missing dashboard data' });
         }
 
-        const { name, dataModel, chartConfigs, sections, filterColumns } = dashboard;
-        const result = await supabaseService.updateDashboard(id, name, dataModel, chartConfigs, sections, filterColumns);
+        const { name, dataModel, chartConfigs, sections, filterColumns, folderId, isWorkspace } = dashboard;
+        const result = await supabaseService.updateDashboard(id, name, dataModel, chartConfigs, sections, filterColumns, folderId, isWorkspace);
         console.log('✅ Dashboard updated successfully:', id);
         res.json(result);
     } catch (error) {
@@ -253,7 +255,86 @@ app.get('/api/admin/dashboards', async (req, res) => {
     }
 });
 
-// File Upload Endpoints
+// ============================================
+// Workspace Folder Endpoints
+// ============================================
+
+// Create a workspace folder
+app.post('/api/workspace/folders', async (req, res) => {
+    try {
+        const { ownerId, name, accessUserIds = [] } = req.body;
+        if (!ownerId || !name) {
+            return res.status(400).json({ error: 'Missing ownerId or name' });
+        }
+        const folder = await supabaseService.createWorkspaceFolder(ownerId, name, accessUserIds);
+        res.json(folder);
+    } catch (error) {
+        console.error('Create workspace folder error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get all folders accessible to a user
+app.get('/api/workspace/folders', async (req, res) => {
+    try {
+        const userId = parseInt(req.query.userId);
+        if (!userId) return res.status(400).json({ error: 'Missing userId' });
+        const folders = await supabaseService.getAccessibleFolders(userId);
+        res.json(folders);
+    } catch (error) {
+        console.error('Get workspace folders error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Update a workspace folder (owner only)
+app.put('/api/workspace/folders/:id', async (req, res) => {
+    try {
+        const folderId = req.params.id;
+        const { name, accessUserIds = [], requestingUserId } = req.body;
+        if (!name || !requestingUserId) {
+            return res.status(400).json({ error: 'Missing name or requestingUserId' });
+        }
+        await supabaseService.updateWorkspaceFolder(folderId, name, accessUserIds, requestingUserId);
+        res.json({ message: 'Folder updated' });
+    } catch (error) {
+        console.error('Update workspace folder error:', error);
+        const status = error.message.includes('owner') ? 403 : 500;
+        res.status(status).json({ error: error.message });
+    }
+});
+
+// Delete a workspace folder (owner only)
+app.delete('/api/workspace/folders/:id', async (req, res) => {
+    try {
+        const folderId = req.params.id;
+        const requestingUserId = parseInt(req.query.userId);
+        if (!requestingUserId) return res.status(400).json({ error: 'Missing userId' });
+        await supabaseService.deleteWorkspaceFolder(folderId, requestingUserId);
+        res.json({ message: 'Folder deleted' });
+    } catch (error) {
+        console.error('Delete workspace folder error:', error);
+        const status = error.message.includes('owner') ? 403 : 500;
+        res.status(status).json({ error: error.message });
+    }
+});
+
+// Get dashboards inside a folder
+app.get('/api/workspace/folders/:folderId/dashboards', async (req, res) => {
+    try {
+        const { folderId } = req.params;
+        const userId = parseInt(req.query.userId);
+        if (!userId) return res.status(400).json({ error: 'Missing userId' });
+        const dashboards = await supabaseService.getWorkspaceDashboardsByFolder(folderId, userId);
+        res.json(dashboards);
+    } catch (error) {
+        console.error('Get folder dashboards error:', error);
+        const status = error.message.includes('Access denied') ? 403 : 500;
+        res.status(status).json({ error: error.message });
+    }
+});
+
+
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No file uploaded' });

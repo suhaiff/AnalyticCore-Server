@@ -111,7 +111,7 @@ class SupabaseService {
 
     // ==================== Dashboard Management ====================
 
-    async createDashboard(userId, name, dataModel, chartConfigs, sections = null, filterColumns = null) {
+    async createDashboard(userId, name, dataModel, chartConfigs, sections = null, filterColumns = null, folderId = null, isWorkspace = false) {
         try {
             console.log('📊 Creating dashboard:', {
                 userId,
@@ -138,7 +138,9 @@ class SupabaseService {
                 name,
                 data_model: dataModel,
                 chart_configs: chartConfigsWrapper,
-                created_at: new Date().toISOString()
+                created_at: new Date().toISOString(),
+                folder_id: folderId || null,
+                is_workspace: isWorkspace || false
             };
 
             const payloadSize = JSON.stringify(payload).length;
@@ -180,7 +182,7 @@ class SupabaseService {
         }
     }
 
-    async updateDashboard(dashboardId, name, dataModel, chartConfigs, sections = null, filterColumns = null) {
+    async updateDashboard(dashboardId, name, dataModel, chartConfigs, sections = null, filterColumns = null, folderId = null, isWorkspace = false) {
         try {
             const chartConfigsWrapper = {
                 charts: chartConfigs,
@@ -193,7 +195,9 @@ class SupabaseService {
                 .update({
                     name,
                     data_model: dataModel,
-                    chart_configs: chartConfigsWrapper
+                    chart_configs: chartConfigsWrapper,
+                    folder_id: folderId || null,
+                    is_workspace: isWorkspace || false
                 })
                 .eq('id', dashboardId)
                 .select()
@@ -213,6 +217,7 @@ class SupabaseService {
                 .from('dashboards')
                 .select('*')
                 .eq('user_id', userId)
+                .eq('is_workspace', false)
                 .order('created_at', { ascending: false });
 
             if (error) throw error;
@@ -241,7 +246,9 @@ class SupabaseService {
                     dataModel: dashboard.data_model || {},
                     chartConfigs,
                     sections,
-                    filterColumns
+                    filterColumns,
+                    folder_id: dashboard.folder_id || null,
+                    is_workspace: dashboard.is_workspace || false
                 };
             });
         } catch (error) {
@@ -744,6 +751,285 @@ class SupabaseService {
             return true;
         } catch (error) {
             console.error('Error clearing resolved API errors:', error.message);
+            throw error;
+        }
+    }
+
+    // ==================== Workspace Folder Management ====================
+
+    async createWorkspaceFolder(ownerId, name, accessUserIds = []) {
+        try {
+            // Create folder
+            const { data: folder, error: folderError } = await this.supabase
+                .from('workspace_folders')
+                .insert([{
+                    name,
+                    owner_id: ownerId.toString(),
+                    created_at: new Date().toISOString()
+                }])
+                .select()
+                .single();
+
+            if (folderError) throw folderError;
+
+            // Add access entries for additional users (not the owner)
+            const nonOwnerIds = accessUserIds.filter(id => id.toString() !== ownerId.toString());
+            if (nonOwnerIds.length > 0) {
+                const accessRows = nonOwnerIds.map(userId => ({
+                    folder_id: folder.id,
+                    user_id: userId.toString()
+                }));
+                const { error: accessError } = await this.supabase
+                    .from('workspace_folder_access')
+                    .insert(accessRows);
+                if (accessError) throw accessError;
+            }
+
+            console.log('✅ Workspace folder created:', folder.id);
+            return folder;
+        } catch (error) {
+            console.error('Error creating workspace folder:', error.message);
+            throw error;
+        }
+    }
+
+    async getAccessibleFolders(userId) {
+        try {
+            const userIdStr = userId.toString();
+
+            // 1. Folders owned by user
+            const { data: ownedFolders, error: ownedError } = await this.supabase
+                .from('workspace_folders')
+                .select('*')
+                .eq('owner_id', userIdStr)
+                .order('created_at', { ascending: false });
+
+            if (ownedError) throw ownedError;
+
+            // 2. Folders shared with user via access table
+            const { data: accessRows, error: accessError } = await this.supabase
+                .from('workspace_folder_access')
+                .select('folder_id')
+                .eq('user_id', userIdStr);
+
+            if (accessError) throw accessError;
+
+            let sharedFolders = [];
+            if (accessRows && accessRows.length > 0) {
+                const sharedFolderIds = accessRows.map(r => r.folder_id);
+                const { data: sf, error: sfError } = await this.supabase
+                    .from('workspace_folders')
+                    .select('*')
+                    .in('id', sharedFolderIds)
+                    .order('created_at', { ascending: false });
+
+                if (sfError) throw sfError;
+                sharedFolders = sf || [];
+            }
+
+            // 3. Merge, deduplicate by id
+            const allFolders = [...(ownedFolders || []), ...sharedFolders];
+            const seen = new Set();
+            const unique = allFolders.filter(f => {
+                if (seen.has(f.id)) return false;
+                seen.add(f.id);
+                return true;
+            });
+
+            // 4. For each folder, fetch access user details
+            const foldersWithAccess = await Promise.all(unique.map(async (folder) => {
+                const { data: fAccess } = await this.supabase
+                    .from('workspace_folder_access')
+                    .select('user_id')
+                    .eq('folder_id', folder.id);
+
+                const accessUserIds = (fAccess || []).map(r => r.user_id);
+                let accessUsers = [];
+                if (accessUserIds.length > 0) {
+                    const { data: users } = await this.supabase
+                        .from('users')
+                        .select('id, name, email')
+                        .in('id', accessUserIds);
+                    accessUsers = (users || []).map(u => ({ id: u.id, name: u.name, email: u.email }));
+                }
+
+                return {
+                    id: folder.id,
+                    name: folder.name,
+                    owner_id: folder.owner_id,
+                    created_at: folder.created_at,
+                    access_users: accessUsers,
+                    is_owner: folder.owner_id && folder.owner_id.toString() === userIdStr
+                };
+            }));
+
+            return foldersWithAccess;
+        } catch (error) {
+            console.error('Error fetching accessible folders:', error.message);
+            throw error;
+        }
+    }
+
+    async updateWorkspaceFolder(folderId, name, accessUserIds = [], requestingUserId) {
+        try {
+            // Verify ownership
+            const { data: folder, error: fetchError } = await this.supabase
+                .from('workspace_folders')
+                .select('owner_id')
+                .eq('id', folderId)
+                .single();
+
+            if (fetchError) throw fetchError;
+            if (!folder) throw new Error('Folder not found');
+
+            console.log('--- Workspace Update Ownership Check ---');
+            console.log('Folder ID:', folderId);
+            console.log('Folder owner_id:', folder.owner_id, typeof folder.owner_id);
+            console.log('Requesting userId:', requestingUserId, typeof requestingUserId);
+            
+            const isOwner = folder && folder.owner_id && folder.owner_id.toString() === requestingUserId.toString();
+            console.log('Is Owner?', isOwner);
+
+            if (!isOwner) {
+                throw new Error('Only the folder owner can update it');
+            }
+
+            // Update name
+            const { error: updateError } = await this.supabase
+                .from('workspace_folders')
+                .update({ name })
+                .eq('id', folderId);
+
+            if (updateError) throw updateError;
+
+            // Replace access list (delete all, re-insert)
+            await this.supabase
+                .from('workspace_folder_access')
+                .delete()
+                .eq('folder_id', folderId);
+
+            const nonOwnerIds = accessUserIds.filter(id => id.toString() !== requestingUserId.toString());
+            if (nonOwnerIds.length > 0) {
+                const accessRows = nonOwnerIds.map(userId => ({
+                    folder_id: folderId,
+                    user_id: userId.toString()
+                }));
+                const { error: accessError } = await this.supabase
+                    .from('workspace_folder_access')
+                    .insert(accessRows);
+                if (accessError) throw accessError;
+            }
+
+            console.log('✅ Workspace folder updated:', folderId);
+            return true;
+        } catch (error) {
+            console.error('Error updating workspace folder:', error.message);
+            throw error;
+        }
+    }
+
+    async deleteWorkspaceFolder(folderId, requestingUserId) {
+        try {
+            // Verify ownership
+            const { data: folder, error: fetchError } = await this.supabase
+                .from('workspace_folders')
+                .select('owner_id')
+                .eq('id', folderId)
+                .single();
+
+            if (fetchError) throw fetchError;
+            if (!folder) throw new Error('Folder not found');
+
+            console.log('--- Workspace Delete Ownership Check ---');
+            console.log('Folder ID:', folderId);
+            console.log('Folder owner_id:', folder.owner_id, typeof folder.owner_id);
+            console.log('Requesting userId:', requestingUserId, typeof requestingUserId);
+
+            const isOwner = folder && folder.owner_id && folder.owner_id.toString() === requestingUserId.toString();
+            console.log('Is Owner?', isOwner);
+
+            if (!isOwner) {
+                throw new Error('Only the folder owner can delete it');
+            }
+
+            // Nullify dashboards referencing this folder
+            await this.supabase
+                .from('dashboards')
+                .update({ folder_id: null, is_workspace: false })
+                .eq('folder_id', folderId);
+
+            // Delete folder (access rows cascade)
+            const { error: deleteError } = await this.supabase
+                .from('workspace_folders')
+                .delete()
+                .eq('id', folderId);
+
+            if (deleteError) throw deleteError;
+
+            console.log('✅ Workspace folder deleted:', folderId);
+            return true;
+        } catch (error) {
+            console.error('Error deleting workspace folder:', error.message);
+            throw error;
+        }
+    }
+
+    async getWorkspaceDashboardsByFolder(folderId, requestingUserId) {
+        try {
+            // Check access: must be owner or in access table
+            const { data: folder } = await this.supabase
+                .from('workspace_folders')
+                .select('owner_id')
+                .eq('id', folderId)
+                .single();
+
+            const isOwner = folder && folder.owner_id && folder.owner_id.toString() === requestingUserId.toString();
+
+            if (!isOwner) {
+                const { data: access } = await this.supabase
+                    .from('workspace_folder_access')
+                    .select('id')
+                    .eq('folder_id', folderId)
+                    .eq('user_id', requestingUserId.toString())
+                    .single();
+
+                if (!access) throw new Error('Access denied to this folder');
+            }
+
+            const { data, error } = await this.supabase
+                .from('dashboards')
+                .select('*')
+                .eq('folder_id', folderId)
+                .order('created_at', { ascending: false });
+
+            if (error) throw error;
+
+            return (data || []).map(dashboard => {
+                const raw = dashboard.chart_configs;
+                let chartConfigs, sections, filterColumns;
+                if (raw && !Array.isArray(raw) && raw.charts) {
+                    chartConfigs = raw.charts || [];
+                    sections = raw.sections || [];
+                    filterColumns = raw.filterColumns || [];
+                } else {
+                    chartConfigs = raw || [];
+                    sections = [];
+                    filterColumns = [];
+                }
+                return {
+                    id: dashboard.id.toString(),
+                    name: dashboard.name,
+                    date: new Date(dashboard.created_at).toLocaleDateString(),
+                    dataModel: dashboard.data_model || {},
+                    chartConfigs,
+                    sections,
+                    filterColumns,
+                    folder_id: dashboard.folder_id || null,
+                    is_workspace: dashboard.is_workspace || false
+                };
+            });
+        } catch (error) {
+            console.error('Error fetching workspace dashboards:', error.message);
             throw error;
         }
     }
