@@ -1889,7 +1889,7 @@ class SupabaseService {
                 .from('dashboard_refresh_schedules')
                 .select('*, dashboards(id, name, data_model, user_id)')
                 .eq('is_active', true)
-                .neq('last_refresh_status', 'running');
+                .or('last_refresh_status.is.null,last_refresh_status.neq.running');
 
             if (error) throw error;
             return data || [];

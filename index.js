@@ -2581,7 +2581,7 @@ function isScheduleDue(schedule) {
     const currentUTCDay = now.getUTCDay(); // 0=Sunday
 
     // Check if we are within the refresh window (within 2 minutes of scheduled time)
-    const isInTimeWindow = currentUTCHours === schedHours && Math.abs(currentUTCMinutes - schedMinutes) <= 1;
+    const isInTimeWindow = currentUTCHours === schedHours && Math.abs(currentUTCMinutes - schedMinutes) <= 2;
 
     if (!lastRefresh) {
         // Never been refreshed, only run if in time window
@@ -2618,6 +2618,7 @@ async function runScheduler() {
 
     try {
         const schedules = await supabaseService.getDueSchedules();
+        console.log(`⏰ [Scheduler] Polled ${schedules.length} active schedule(s) at ${new Date().toISOString()}`);
         
         for (const schedule of schedules) {
             if (isScheduleDue(schedule)) {
