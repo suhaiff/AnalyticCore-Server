@@ -32,11 +32,15 @@ class SupabaseService {
         try {
             const { data, error } = await this.supabase
                 .from('users')
-                .select('*')
+                .select('*, organizations(id, name)')
                 .order('created_at', { ascending: false });
 
             if (error) throw error;
-            return data || [];
+            return (data || []).map(u => ({
+                ...u,
+                organization_name: u.organizations?.name || null,
+                organizations: undefined
+            }));
         } catch (error) {
             console.error('Error fetching users:', error.message);
             throw error;
@@ -63,23 +67,26 @@ class SupabaseService {
         }
     }
 
-    async createUser(name, email, password, role = 'USER', phone = null, company = null, job_title = null, domain = null) {
+    async createUser(name, email, password, role = 'USER', phone = null, company = null, job_title = null, domain = null, organization_id = null, is_superuser = false, must_change_password = false) {
         try {
+            const insertData = {
+                name,
+                email,
+                password,
+                role,
+                phone,
+                company,
+                job_title,
+                domain,
+                is_superuser: is_superuser || false,
+                must_change_password: must_change_password || false,
+                created_at: new Date().toISOString()
+            };
+            if (organization_id) insertData.organization_id = organization_id;
+
             const { data, error } = await this.supabase
                 .from('users')
-                .insert([
-                    {
-                        name,
-                        email,
-                        password, // In production, use bcrypt to hash passwords!
-                        role,
-                        phone,
-                        company,
-                        job_title,
-                        domain,
-                        created_at: new Date().toISOString()
-                    }
-                ])
+                .insert([insertData])
                 .select()
                 .single();
 
@@ -105,6 +112,69 @@ class SupabaseService {
             return true;
         } catch (error) {
             console.error('Error deleting user:', error.message);
+            throw error;
+        }
+    }
+
+    async updateUserPassword(userId, newPassword, clearMustChange = true) {
+        try {
+            const updateData = { password: newPassword };
+            if (clearMustChange) updateData.must_change_password = false;
+
+            const { error } = await this.supabase
+                .from('users')
+                .update(updateData)
+                .eq('id', userId);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error updating user password:', error.message);
+            throw error;
+        }
+    }
+
+    async setUserOtp(email, otpCode, expiresAt) {
+        try {
+            const { error } = await this.supabase
+                .from('users')
+                .update({ otp_code: otpCode, otp_expires_at: expiresAt })
+                .eq('email', email);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error setting user OTP:', error.message);
+            throw error;
+        }
+    }
+
+    async clearUserOtp(email) {
+        try {
+            const { error } = await this.supabase
+                .from('users')
+                .update({ otp_code: null, otp_expires_at: null })
+                .eq('email', email);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error clearing user OTP:', error.message);
+            throw error;
+        }
+    }
+
+    async updateUserPasswordByEmail(email, newPassword) {
+        try {
+            const { error } = await this.supabase
+                .from('users')
+                .update({ password: newPassword, must_change_password: false, otp_code: null, otp_expires_at: null })
+                .eq('email', email);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error updating user password by email:', error.message);
             throw error;
         }
     }
@@ -757,7 +827,7 @@ class SupabaseService {
 
     // ==================== Workspace Folder Management ====================
 
-    async createWorkspaceFolder(ownerId, name, accessUserIds = []) {
+    async createWorkspaceFolder(ownerId, name, accessUsers = [], accessGroups = []) {
         try {
             // Create folder
             const { data: folder, error: folderError } = await this.supabase
@@ -772,12 +842,13 @@ class SupabaseService {
 
             if (folderError) throw folderError;
 
-            // Add access entries for additional users (not the owner)
-            const nonOwnerIds = accessUserIds.filter(id => id.toString() !== ownerId.toString());
-            if (nonOwnerIds.length > 0) {
-                const accessRows = nonOwnerIds.map(userId => ({
+            // Add user access entries
+            const nonOwnerUsers = accessUsers.filter(u => u.id.toString() !== ownerId.toString());
+            if (nonOwnerUsers.length > 0) {
+                const accessRows = nonOwnerUsers.map(u => ({
                     folder_id: folder.id,
-                    user_id: userId.toString()
+                    user_id: u.id.toString(),
+                    access_level: u.level || 'VIEWER'
                 }));
                 const { error: accessError } = await this.supabase
                     .from('workspace_folder_access')
@@ -785,7 +856,20 @@ class SupabaseService {
                 if (accessError) throw accessError;
             }
 
-            console.log('✅ Workspace folder created:', folder.id);
+            // Add group access entries
+            if (accessGroups && accessGroups.length > 0) {
+                const groupAccessRows = accessGroups.map(g => ({
+                    folder_id: folder.id,
+                    group_id: g.id,
+                    access_level: g.level || 'VIEWER'
+                }));
+                const { error: groupAccessError } = await this.supabase
+                    .from('workspace_folder_group_access')
+                    .insert(groupAccessRows);
+                if (groupAccessError) throw groupAccessError;
+            }
+
+            console.log('✅ Workspace folder created with levels:', folder.id);
             return folder;
         } catch (error) {
             console.error('Error creating workspace folder:', error.message);
@@ -806,7 +890,7 @@ class SupabaseService {
 
             if (ownedError) throw ownedError;
 
-            // 2. Folders shared with user via access table
+            // 2. Folders shared with user via user access table
             const { data: accessRows, error: accessError } = await this.supabase
                 .from('workspace_folder_access')
                 .select('folder_id')
@@ -814,9 +898,33 @@ class SupabaseService {
 
             if (accessError) throw accessError;
 
+            // 2.5 Folders shared with user via group access table
+            const { data: userGroups, error: userGroupsError } = await this.supabase
+                .from('workspace_group_members')
+                .select('group_id')
+                .eq('user_id', userIdStr);
+            
+            if (userGroupsError) throw userGroupsError;
+
+            let groupFolderIds = [];
+            if (userGroups && userGroups.length > 0) {
+                const groupIds = userGroups.map(ug => ug.group_id);
+                const { data: groupAccessRows, error: groupAccessError } = await this.supabase
+                    .from('workspace_folder_group_access')
+                    .select('folder_id')
+                    .in('group_id', groupIds);
+                
+                if (groupAccessError) throw groupAccessError;
+                groupFolderIds = (groupAccessRows || []).map(r => r.folder_id);
+            }
+
             let sharedFolders = [];
-            if (accessRows && accessRows.length > 0) {
-                const sharedFolderIds = accessRows.map(r => r.folder_id);
+            const sharedFolderIds = [
+                ...((accessRows || []).map(r => r.folder_id)),
+                ...groupFolderIds
+            ];
+
+            if (sharedFolderIds.length > 0) {
                 const { data: sf, error: sfError } = await this.supabase
                     .from('workspace_folders')
                     .select('*')
@@ -830,27 +938,107 @@ class SupabaseService {
             // 3. Merge, deduplicate by id
             const allFolders = [...(ownedFolders || []), ...sharedFolders];
             const seen = new Set();
-            const unique = allFolders.filter(f => {
-                if (seen.has(f.id)) return false;
-                seen.add(f.id);
-                return true;
-            });
+            const uniqueFolders = [];
 
-            // 4. For each folder, fetch access user details
-            const foldersWithAccess = await Promise.all(unique.map(async (folder) => {
+            for (const f of allFolders) {
+                if (!seen.has(f.id)) {
+                    seen.add(f.id);
+                    
+                    // Attach effective role
+                    const isOwner = f.owner_id && f.owner_id.toString() === userIdStr;
+                    let role = isOwner ? 'ADMIN' : 'VIEWER';
+
+                    if (!isOwner) {
+                        // We need to fetch the highest role for this folder from both direct and group access
+                        // Check direct user access role
+                        const { data: directAccess } = await this.supabase
+                            .from('workspace_folder_access')
+                            .select('access_level')
+                            .eq('folder_id', f.id)
+                            .eq('user_id', userIdStr)
+                            .single();
+                        
+                        if (directAccess) role = directAccess.access_level;
+
+                        // Check group access roles
+                        if (userGroups && userGroups.length > 0) {
+                            const groupIds = userGroups.map(ug => ug.group_id);
+                            const { data: groupAccess } = await this.supabase
+                                .from('workspace_folder_group_access')
+                                .select('access_level')
+                                .eq('folder_id', f.id)
+                                .in('group_id', groupIds);
+                            
+                            if (groupAccess && groupAccess.length > 0) {
+                                const rolePriority = { 'ADMIN': 3, 'EDITOR': 2, 'VIEWER': 1 };
+                                for (const ga of groupAccess) {
+                                    if (rolePriority[ga.access_level] > rolePriority[role]) {
+                                        role = ga.access_level;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    uniqueFolders.push({
+                        ...f,
+                        is_owner: isOwner,
+                        effective_level: role
+                    });
+                }
+            }
+
+            // 4. For each folder, fetch access user and group details
+            const foldersWithAccess = await Promise.all(uniqueFolders.map(async (folder) => {
+                // Fetch User access
                 const { data: fAccess } = await this.supabase
                     .from('workspace_folder_access')
-                    .select('user_id')
+                    .select('user_id, access_level')
                     .eq('folder_id', folder.id);
 
-                const accessUserIds = (fAccess || []).map(r => r.user_id);
+                const accessUserMap = (fAccess || []).reduce((acc, r) => {
+                    acc[r.user_id] = r.access_level;
+                    return acc;
+                }, {});
+
+                const accessUserIds = Object.keys(accessUserMap);
                 let accessUsers = [];
                 if (accessUserIds.length > 0) {
                     const { data: users } = await this.supabase
                         .from('users')
                         .select('id, name, email')
                         .in('id', accessUserIds);
-                    accessUsers = (users || []).map(u => ({ id: u.id, name: u.name, email: u.email }));
+                    accessUsers = (users || []).map(u => ({ 
+                        id: u.id, 
+                        name: u.name, 
+                        email: u.email,
+                        level: accessUserMap[u.id] || 'VIEWER'
+                    }));
+                }
+
+                // Fetch Group access
+                const { data: fgAccess } = await this.supabase
+                    .from('workspace_folder_group_access')
+                    .select('group_id, access_level')
+                    .eq('folder_id', folder.id);
+                
+                const accessGroupMap = (fgAccess || []).reduce((acc, r) => {
+                    acc[r.group_id] = r.access_level;
+                    return acc;
+                }, {});
+
+                const accessGroupIds = Object.keys(accessGroupMap);
+                let accessGroups = [];
+                if (accessGroupIds.length > 0) {
+                    const { data: groups } = await this.supabase
+                        .from('workspace_groups')
+                        .select('id, name')
+                        .in('id', accessGroupIds);
+                    accessGroups = (groups || []).map(g => ({ 
+                        id: g.id, 
+                        name: g.name,
+                        level: accessGroupMap[g.id] || 'VIEWER'
+                    }));
                 }
 
                 return {
@@ -859,6 +1047,7 @@ class SupabaseService {
                     owner_id: folder.owner_id,
                     created_at: folder.created_at,
                     access_users: accessUsers,
+                    access_groups: accessGroups,
                     is_owner: folder.owner_id && folder.owner_id.toString() === userIdStr
                 };
             }));
@@ -870,7 +1059,7 @@ class SupabaseService {
         }
     }
 
-    async updateWorkspaceFolder(folderId, name, accessUserIds = [], requestingUserId) {
+    async updateWorkspaceFolder(folderId, name, accessUsers = [], accessGroups = [], requestingUserId) {
         try {
             // Verify ownership
             const { data: folder, error: fetchError } = await this.supabase
@@ -882,15 +1071,10 @@ class SupabaseService {
             if (fetchError) throw fetchError;
             if (!folder) throw new Error('Folder not found');
 
-            console.log('--- Workspace Update Ownership Check ---');
-            console.log('Folder ID:', folderId);
-            console.log('Folder owner_id:', folder.owner_id, typeof folder.owner_id);
-            console.log('Requesting userId:', requestingUserId, typeof requestingUserId);
-            
             const isOwner = folder && folder.owner_id && folder.owner_id.toString() === requestingUserId.toString();
-            console.log('Is Owner?', isOwner);
 
             if (!isOwner) {
+                // FUTURE: Check for ADMIN level here if we want to allow admins to manage access
                 throw new Error('Only the folder owner can update it');
             }
 
@@ -902,17 +1086,18 @@ class SupabaseService {
 
             if (updateError) throw updateError;
 
-            // Replace access list (delete all, re-insert)
+            // Replace user access list
             await this.supabase
                 .from('workspace_folder_access')
                 .delete()
                 .eq('folder_id', folderId);
 
-            const nonOwnerIds = accessUserIds.filter(id => id.toString() !== requestingUserId.toString());
-            if (nonOwnerIds.length > 0) {
-                const accessRows = nonOwnerIds.map(userId => ({
+            const nonOwnerUsers = accessUsers.filter(u => u.id.toString() !== requestingUserId.toString());
+            if (nonOwnerUsers.length > 0) {
+                const accessRows = nonOwnerUsers.map(u => ({
                     folder_id: folderId,
-                    user_id: userId.toString()
+                    user_id: u.id.toString(),
+                    access_level: u.level || 'VIEWER'
                 }));
                 const { error: accessError } = await this.supabase
                     .from('workspace_folder_access')
@@ -920,7 +1105,25 @@ class SupabaseService {
                 if (accessError) throw accessError;
             }
 
-            console.log('✅ Workspace folder updated:', folderId);
+            // Replace group access list
+            await this.supabase
+                .from('workspace_folder_group_access')
+                .delete()
+                .eq('folder_id', folderId);
+
+            if (accessGroups && accessGroups.length > 0) {
+                const groupAccessRows = accessGroups.map(g => ({
+                    folder_id: folderId,
+                    group_id: g.id,
+                    access_level: g.level || 'VIEWER'
+                }));
+                const { error: groupAccessError } = await this.supabase
+                    .from('workspace_folder_group_access')
+                    .insert(groupAccessRows);
+                if (groupAccessError) throw groupAccessError;
+            }
+
+            console.log('✅ Workspace folder updated with levels:', folderId);
             return true;
         } catch (error) {
             console.error('Error updating workspace folder:', error.message);
@@ -974,7 +1177,7 @@ class SupabaseService {
         }
     }
 
-    async getWorkspaceDashboardsByFolder(folderId, requestingUserId) {
+    async getFolderDashboards(folderId, requestingUserId) {
         try {
             // Check access: must be owner or in access table
             const { data: folder } = await this.supabase
@@ -984,29 +1187,85 @@ class SupabaseService {
                 .single();
 
             const isOwner = folder && folder.owner_id && folder.owner_id.toString() === requestingUserId.toString();
+            let effectiveLevel = isOwner ? 'ADMIN' : null;
 
             if (!isOwner) {
+                // Check direct user access
                 const { data: access } = await this.supabase
                     .from('workspace_folder_access')
-                    .select('id')
+                    .select('access_level')
                     .eq('folder_id', folderId)
                     .eq('user_id', requestingUserId.toString())
                     .single();
 
-                if (!access) throw new Error('Access denied to this folder');
+                if (access) {
+                    effectiveLevel = access.access_level;
+                }
+
+                // Check group access
+                const { data: userGroups } = await this.supabase
+                    .from('workspace_group_members')
+                    .select('group_id')
+                    .eq('user_id', requestingUserId.toString());
+                
+                if (userGroups && userGroups.length > 0) {
+                    const groupIds = userGroups.map(ug => ug.group_id);
+                    const { data: groupAccesses } = await this.supabase
+                        .from('workspace_folder_group_access')
+                        .select('access_level')
+                        .eq('folder_id', folderId)
+                        .in('group_id', groupIds);
+                    
+                    if (groupAccesses && groupAccesses.length > 0) {
+                        const levels = ['VIEWER', 'EDITOR', 'ADMIN'];
+                        groupAccesses.forEach(ga => {
+                            if (!effectiveLevel || levels.indexOf(ga.access_level) > levels.indexOf(effectiveLevel)) {
+                                effectiveLevel = ga.access_level;
+                            }
+                        });
+                    }
+                }
+
+                if (!effectiveLevel) {
+                    throw new Error('Access denied to this folder');
+                }
             }
 
             const { data, error } = await this.supabase
                 .from('dashboards')
-                .select('*')
+                .select(`
+                    *,
+                    users(id, name, email)
+                `)
+
                 .eq('folder_id', folderId)
+                .eq('is_workspace', true)
                 .order('created_at', { ascending: false });
 
             if (error) throw error;
 
-            return (data || []).map(dashboard => {
+            // Fetch specific individual access levels for these dashboards for this user
+            const dashboardIds = (data || []).map(d => d.id);
+            let userAccessMap = {};
+            
+            if (dashboardIds.length > 0) {
+                const { data: accessData } = await this.supabase
+                    .from('dashboard_access')
+                    .select('dashboard_id, access_level')
+                    .in('dashboard_id', dashboardIds)
+                    .eq('user_id', requestingUserId);
+                
+                if (accessData) {
+                    accessData.forEach(acc => {
+                        userAccessMap[acc.dashboard_id] = acc.access_level;
+                    });
+                }
+            }
+
+            const dashboards = (data || []).map(dashboard => {
                 const raw = dashboard.chart_configs;
                 let chartConfigs, sections, filterColumns;
+
                 if (raw && !Array.isArray(raw) && raw.charts) {
                     chartConfigs = raw.charts || [];
                     sections = raw.sections || [];
@@ -1016,6 +1275,7 @@ class SupabaseService {
                     sections = [];
                     filterColumns = [];
                 }
+
                 return {
                     id: dashboard.id.toString(),
                     name: dashboard.name,
@@ -1025,11 +1285,653 @@ class SupabaseService {
                     sections,
                     filterColumns,
                     folder_id: dashboard.folder_id || null,
-                    is_workspace: dashboard.is_workspace || false
+                    is_workspace: dashboard.is_workspace || false,
+                    user_id: dashboard.user_id,
+                    owner_name: dashboard.users?.name || 'Unknown',
+                    shared_access_level: userAccessMap[dashboard.id] || null
+                };
+            });
+
+
+            return {
+                dashboards,
+                effectiveLevel
+            };
+        } catch (error) {
+            console.error('Error fetching folder dashboards:', error.message);
+            throw error;
+        }
+    }
+
+    // ==================== Workspace Group Management ====================
+
+    async createWorkspaceGroup(ownerId, name, userIds = []) {
+        try {
+            const { data: group, error: groupError } = await this.supabase
+                .from('workspace_groups')
+                .insert([{
+                    name,
+                    owner_id: ownerId.toString(),
+                    created_at: new Date().toISOString()
+                }])
+                .select()
+                .single();
+
+            if (groupError) throw groupError;
+
+            if (userIds && userIds.length > 0) {
+                const memberRows = userIds.map(userId => ({
+                    group_id: group.id,
+                    user_id: userId.toString()
+                }));
+                const { error: memberError } = await this.supabase
+                    .from('workspace_group_members')
+                    .insert(memberRows);
+                
+                if (memberError) throw memberError;
+            }
+
+            return group;
+        } catch (error) {
+            console.error('Error creating workspace group:', error.message);
+            throw error;
+        }
+    }
+
+    async getWorkspaceGroups(ownerId) {
+        try {
+            const { data: groups, error: groupsError } = await this.supabase
+                .from('workspace_groups')
+                .select('*')
+                .eq('owner_id', ownerId.toString())
+                .order('created_at', { ascending: false });
+
+            if (groupsError) throw groupsError;
+
+            // Fetch members for each group
+            const groupsWithMembers = await Promise.all((groups || []).map(async (group) => {
+                const { data: members, error: membersError } = await this.supabase
+                    .from('workspace_group_members')
+                    .select('user_id')
+                    .eq('group_id', group.id);
+                
+                const userIds = (members || []).map(m => m.user_id);
+                let users = [];
+                if (userIds.length > 0) {
+                    const { data: usersData } = await this.supabase
+                        .from('users')
+                        .select('id, name, email')
+                        .in('id', userIds);
+                    users = usersData || [];
+                }
+
+                return {
+                    ...group,
+                    members: users
+                };
+            }));
+
+            return groupsWithMembers;
+        } catch (error) {
+            console.error('Error fetching workspace groups:', error.message);
+            throw error;
+        }
+    }
+
+    async updateWorkspaceGroup(groupId, name, userIds = [], requestingUserId) {
+        try {
+            const { data: group, error: fetchError } = await this.supabase
+                .from('workspace_groups')
+                .select('owner_id')
+                .eq('id', groupId)
+                .single();
+
+            if (fetchError) throw fetchError;
+            if (group.owner_id.toString() !== requestingUserId.toString()) {
+                throw new Error('Only the group owner can update it');
+            }
+
+            const { error: updateError } = await this.supabase
+                .from('workspace_groups')
+                .update({ name })
+                .eq('id', groupId);
+
+            if (updateError) throw updateError;
+
+            // Replace members
+            await this.supabase
+                .from('workspace_group_members')
+                .delete()
+                .eq('group_id', groupId);
+
+            if (userIds && userIds.length > 0) {
+                const memberRows = userIds.map(userId => ({
+                    group_id: groupId,
+                    user_id: userId.toString()
+                }));
+                const { error: memberError } = await this.supabase
+                    .from('workspace_group_members')
+                    .insert(memberRows);
+                
+                if (memberError) throw memberError;
+            }
+
+            return true;
+        } catch (error) {
+            console.error('Error updating workspace group:', error.message);
+            throw error;
+        }
+    }
+
+    async deleteWorkspaceGroup(groupId, requestingUserId) {
+        try {
+            const { data: group, error: fetchError } = await this.supabase
+                .from('workspace_groups')
+                .select('owner_id')
+                .eq('id', groupId)
+                .single();
+
+            if (fetchError) throw fetchError;
+            if (group.owner_id.toString() !== requestingUserId.toString()) {
+                throw new Error('Only the group owner can delete it');
+            }
+
+            const { error: deleteError } = await this.supabase
+                .from('workspace_groups')
+                .delete()
+                .eq('id', groupId);
+
+            if (deleteError) throw deleteError;
+            return true;
+        } catch (error) {
+            console.error('Error deleting workspace group:', error.message);
+            throw error;
+        }
+    }
+    // ==================== Organization Management ====================
+
+    async createOrganization(name) {
+        try {
+            const { data, error } = await this.supabase
+                .from('organizations')
+                .insert([{ name, created_at: new Date().toISOString() }])
+                .select()
+                .single();
+
+            if (error) throw error;
+            return data;
+        } catch (error) {
+            console.error('Error creating organization:', error.message);
+            throw error;
+        }
+    }
+
+    async getOrganizations() {
+        try {
+            const { data, error } = await this.supabase
+                .from('organizations')
+                .select('*')
+                .order('name', { ascending: true });
+
+            if (error) throw error;
+            return data || [];
+        } catch (error) {
+            console.error('Error fetching organizations:', error.message);
+            throw error;
+        }
+    }
+
+    async deleteOrganization(id) {
+        try {
+            // Unset organization_id for users in this org
+            await this.supabase
+                .from('users')
+                .update({ organization_id: null, is_superuser: false })
+                .eq('organization_id', id);
+
+            const { error } = await this.supabase
+                .from('organizations')
+                .delete()
+                .eq('id', id);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error deleting organization:', error.message);
+            throw error;
+        }
+    }
+
+    async updateUserOrganization(userId, organizationId) {
+        try {
+            const updateData = { organization_id: organizationId || null };
+            // If removing from org, also remove superuser flag
+            if (!organizationId) {
+                updateData.is_superuser = false;
+            }
+            const { error } = await this.supabase
+                .from('users')
+                .update(updateData)
+                .eq('id', userId);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error updating user organization:', error.message);
+            throw error;
+        }
+    }
+
+    async updateUserSuperuser(userId, isSuperuser) {
+        try {
+            const { error } = await this.supabase
+                .from('users')
+                .update({ is_superuser: isSuperuser })
+                .eq('id', userId);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error updating user superuser status:', error.message);
+            throw error;
+        }
+    }
+
+    async getUsersByOrganization(orgId) {
+        try {
+            const { data, error } = await this.supabase
+                .from('users')
+                .select('id, name, email, role, is_superuser, organization_id')
+                .eq('organization_id', orgId)
+                .order('name', { ascending: true });
+
+            if (error) throw error;
+            return data || [];
+        } catch (error) {
+            console.error('Error fetching users by organization:', error.message);
+            throw error;
+        }
+    }
+
+    // ==================== Dashboard Access Sharing ====================
+
+    async grantDashboardAccess(dashboardId, userId, accessLevel, grantedBy) {
+        try {
+            // Verify the granter is the dashboard owner or a CO_OWNER
+            const { data: dashboard } = await this.supabase
+                .from('dashboards')
+                .select('user_id')
+                .eq('id', dashboardId)
+                .single();
+
+            if (!dashboard) throw new Error('Dashboard not found');
+
+            const isOwner = dashboard.user_id.toString() === grantedBy.toString();
+
+            if (!isOwner) {
+                // Check if granter is a CO_OWNER
+                const { data: granterAccess } = await this.supabase
+                    .from('dashboard_access')
+                    .select('access_level')
+                    .eq('dashboard_id', dashboardId)
+                    .eq('user_id', grantedBy.toString())
+                    .single();
+
+                if (!granterAccess || granterAccess.access_level !== 'CO_OWNER') {
+                    throw new Error('Only the dashboard owner or co-owners can share access');
+                }
+            }
+
+            // Cannot grant access to the owner themselves
+            if (dashboard.user_id.toString() === userId.toString()) {
+                throw new Error('Cannot grant access to the dashboard owner');
+            }
+
+            // Upsert access
+            const { data, error } = await this.supabase
+                .from('dashboard_access')
+                .upsert([{
+                    dashboard_id: dashboardId,
+                    user_id: userId,
+                    access_level: accessLevel,
+                    granted_by: grantedBy,
+                    created_at: new Date().toISOString()
+                }], { onConflict: 'dashboard_id,user_id' })
+                .select()
+                .single();
+
+            if (error) throw error;
+            return data;
+        } catch (error) {
+            console.error('Error granting dashboard access:', error.message);
+            throw error;
+        }
+    }
+
+    async revokeDashboardAccess(dashboardId, userId, requestingUserId) {
+        try {
+            // Verify the requester is the owner or CO_OWNER
+            const { data: dashboard } = await this.supabase
+                .from('dashboards')
+                .select('user_id')
+                .eq('id', dashboardId)
+                .single();
+
+            if (!dashboard) throw new Error('Dashboard not found');
+
+            const isOwner = dashboard.user_id.toString() === requestingUserId.toString();
+
+            if (!isOwner) {
+                const { data: requesterAccess } = await this.supabase
+                    .from('dashboard_access')
+                    .select('access_level')
+                    .eq('dashboard_id', dashboardId)
+                    .eq('user_id', requestingUserId.toString())
+                    .single();
+
+                if (!requesterAccess || requesterAccess.access_level !== 'CO_OWNER') {
+                    throw new Error('Only the dashboard owner or co-owners can revoke access');
+                }
+            }
+
+            const { error } = await this.supabase
+                .from('dashboard_access')
+                .delete()
+                .eq('dashboard_id', dashboardId)
+                .eq('user_id', userId);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error revoking dashboard access:', error.message);
+            throw error;
+        }
+    }
+
+    async getDashboardAccessList(dashboardId) {
+        try {
+            const { data, error } = await this.supabase
+                .from('dashboard_access')
+                .select('*, users!dashboard_access_user_id_fkey(id, name, email)')
+                .eq('dashboard_id', dashboardId)
+                .order('created_at', { ascending: true });
+
+            if (error) throw error;
+
+            return (data || []).map(entry => ({
+                id: entry.id,
+                dashboard_id: entry.dashboard_id,
+                user_id: entry.user_id,
+                user_name: entry.users?.name || 'Unknown',
+                user_email: entry.users?.email || '',
+                access_level: entry.access_level,
+                granted_by: entry.granted_by,
+                created_at: entry.created_at
+            }));
+        } catch (error) {
+            console.error('Error fetching dashboard access list:', error.message);
+            throw error;
+        }
+    }
+
+    async getSharedDashboards(userId) {
+        try {
+            const { data, error } = await this.supabase
+                .from('dashboard_access')
+                .select('access_level, dashboards(*, users(id, name, email))')
+                .eq('user_id', userId)
+                .order('created_at', { ascending: false });
+
+            if (error) throw error;
+
+            return (data || []).filter(entry => entry.dashboards).map(entry => {
+                const dashboard = entry.dashboards;
+                const raw = dashboard.chart_configs;
+                let chartConfigs, sections, filterColumns;
+
+                if (raw && !Array.isArray(raw) && raw.charts) {
+                    chartConfigs = raw.charts || [];
+                    sections = raw.sections || [];
+                    filterColumns = raw.filterColumns || [];
+                } else {
+                    chartConfigs = raw || [];
+                    sections = [];
+                    filterColumns = [];
+                }
+
+                return {
+                    id: dashboard.id.toString(),
+                    name: dashboard.name,
+                    date: new Date(dashboard.created_at).toLocaleDateString(),
+                    dataModel: dashboard.data_model || {},
+                    chartConfigs,
+                    sections,
+                    filterColumns,
+                    folder_id: dashboard.folder_id || null,
+                    is_workspace: dashboard.is_workspace || false,
+                    user_id: dashboard.user_id,
+                    owner_name: dashboard.users?.name || 'Unknown',
+                    shared_access_level: entry.access_level
                 };
             });
         } catch (error) {
-            console.error('Error fetching workspace dashboards:', error.message);
+            console.error('Error fetching shared dashboards:', error.message);
+            throw error;
+        }
+    }
+
+    async grantDashboardAccess(dashboardId, userId, accessLevel, grantedBy) {
+        try {
+            // Check if grantedBy is owner or co-owner
+            const { data: dashboard } = await this.supabase
+                .from('dashboards')
+                .select('user_id')
+                .eq('id', dashboardId)
+                .single();
+
+            const isOwner = dashboard && dashboard.user_id.toString() === grantedBy.toString();
+            
+            if (!isOwner) {
+                const { data: access } = await this.supabase
+                    .from('dashboard_access')
+                    .select('access_level')
+                    .eq('dashboard_id', dashboardId)
+                    .eq('user_id', grantedBy)
+                    .single();
+
+                if (!access || access.access_level !== 'CO_OWNER') {
+                    throw new Error('Only owners or co-owners can grant access');
+                }
+            }
+
+            const { data, error } = await this.supabase
+                .from('dashboard_access')
+                .upsert({
+                    dashboard_id: dashboardId,
+                    user_id: userId,
+                    access_level: accessLevel,
+                    granted_by: grantedBy,
+                    created_at: new Date().toISOString()
+                }, { onConflict: 'dashboard_id,user_id' })
+                .select()
+                .single();
+
+            if (error) throw error;
+            return data;
+        } catch (error) {
+            console.error('Error granting dashboard access:', error.message);
+            throw error;
+        }
+    }
+
+    async revokeDashboardAccess(dashboardId, userId, revokerId) {
+        try {
+            // Check if revoker is owner or co-owner
+            const { data: dashboard } = await this.supabase
+                .from('dashboards')
+                .select('user_id')
+                .eq('id', dashboardId)
+                .single();
+
+            const isOwner = dashboard && dashboard.user_id.toString() === revokerId.toString();
+            
+            if (!isOwner) {
+                const { data: access } = await this.supabase
+                    .from('dashboard_access')
+                    .select('access_level')
+                    .eq('dashboard_id', dashboardId)
+                    .eq('user_id', revokerId)
+                    .single();
+
+                if (!access || access.access_level !== 'CO_OWNER') {
+                    throw new Error('Only owners or co-owners can revoke access');
+                }
+            }
+
+            // Cannot revoke access from the owner themselves
+            if (dashboard && dashboard.user_id.toString() === userId.toString()) {
+                throw new Error('Cannot revoke access from the dashboard owner');
+            }
+
+            const { error } = await this.supabase
+                .from('dashboard_access')
+                .delete()
+                .eq('dashboard_id', dashboardId)
+                .eq('user_id', userId);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error revoking dashboard access:', error.message);
+            throw error;
+        }
+    }
+
+    // ==================== Scheduled Refresh ====================
+
+    async createRefreshSchedule(dashboardId, userId, sourceType, sourceCredentials, refreshFrequency, refreshTimeUtc, refreshDay = null) {
+        try {
+            const { data, error } = await this.supabase
+                .from('dashboard_refresh_schedules')
+                .upsert([{
+                    dashboard_id: dashboardId,
+                    user_id: userId,
+                    source_type: sourceType,
+                    source_credentials: sourceCredentials,
+                    refresh_frequency: refreshFrequency,
+                    refresh_time_utc: refreshTimeUtc,
+                    refresh_day: refreshDay,
+                    is_active: true,
+                    updated_at: new Date().toISOString()
+                }], { onConflict: 'dashboard_id' })
+                .select()
+                .single();
+
+            if (error) throw error;
+            return data;
+        } catch (error) {
+            console.error('Error creating refresh schedule:', error.message);
+            throw error;
+        }
+    }
+
+    async getRefreshSchedule(dashboardId) {
+        try {
+            const { data, error } = await this.supabase
+                .from('dashboard_refresh_schedules')
+                .select('*')
+                .eq('dashboard_id', dashboardId)
+                .maybeSingle();
+
+            if (error) throw error;
+            return data; // null if not found
+        } catch (error) {
+            console.error('Error fetching refresh schedule:', error.message);
+            throw error;
+        }
+    }
+
+    async updateRefreshSchedule(scheduleId, updates) {
+        try {
+            const { data, error } = await this.supabase
+                .from('dashboard_refresh_schedules')
+                .update({ ...updates, updated_at: new Date().toISOString() })
+                .eq('id', scheduleId)
+                .select()
+                .single();
+
+            if (error) throw error;
+            return data;
+        } catch (error) {
+            console.error('Error updating refresh schedule:', error.message);
+            throw error;
+        }
+    }
+
+    async deleteRefreshSchedule(dashboardId) {
+        try {
+            const { error } = await this.supabase
+                .from('dashboard_refresh_schedules')
+                .delete()
+                .eq('dashboard_id', dashboardId);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error deleting refresh schedule:', error.message);
+            throw error;
+        }
+    }
+
+    async getDueSchedules() {
+        try {
+            const { data, error } = await this.supabase
+                .from('dashboard_refresh_schedules')
+                .select('*, dashboards(id, name, data_model, user_id)')
+                .eq('is_active', true)
+                .neq('last_refresh_status', 'running');
+
+            if (error) throw error;
+            return data || [];
+        } catch (error) {
+            console.error('Error fetching due schedules:', error.message);
+            return [];
+        }
+    }
+
+    async updateLastRefresh(dashboardId, status, errorMsg = null) {
+        try {
+            const updateData = {
+                last_refreshed_at: new Date().toISOString(),
+                last_refresh_status: status,
+                last_refresh_error: errorMsg,
+                updated_at: new Date().toISOString()
+            };
+
+            const { error } = await this.supabase
+                .from('dashboard_refresh_schedules')
+                .update(updateData)
+                .eq('dashboard_id', dashboardId);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error updating last refresh:', error.message);
+            return false;
+        }
+    }
+
+    async updateDashboardDataModel(dashboardId, dataModel) {
+        try {
+            const { error } = await this.supabase
+                .from('dashboards')
+                .update({ data_model: dataModel })
+                .eq('id', dashboardId);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error updating dashboard data model:', error.message);
             throw error;
         }
     }

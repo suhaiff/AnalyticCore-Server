@@ -8,6 +8,7 @@ const multer = require('multer');
 const fs = require('fs');
 const XLSX = require('xlsx');
 const supabaseService = require('./supabaseService');
+const brevoService = require('./brevoService');
 const googleSheetsService = require('./googleSheetsService');
 const sharepointService = require('./sharepointService');
 const sharepointOAuthService = require('./sharepointOAuthService');
@@ -83,11 +84,26 @@ console.log('Starting server with Supabase integration...');
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'ok',
-        version: '1.0.3-dashboard-overwrite-fix',
+        version: '1.0.7-folder-fetch-fix',
         uptime: process.uptime(),
         timestamp: new Date().toISOString()
     });
 });
+
+// Helper: Generate a random temporary password
+function generateTempPassword(length = 10) {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
+    let password = '';
+    for (let i = 0; i < length; i++) {
+        password += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return password;
+}
+
+// Helper: Generate a 6-digit OTP
+function generateOtp() {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+}
 
 // Auth Endpoints
 app.post('/api/login', async (req, res) => {
@@ -97,8 +113,8 @@ app.post('/api/login', async (req, res) => {
 
         if (user && user.password === password) {
             // Don't send password back
-            const { password, ...userWithoutPassword } = user;
-            res.json(userWithoutPassword);
+            const { password, otp_code, otp_expires_at, ...userWithoutSensitive } = user;
+            res.json(userWithoutSensitive);
         } else {
             res.status(401).json({ error: 'Invalid credentials' });
         }
@@ -110,7 +126,7 @@ app.post('/api/login', async (req, res) => {
 
 app.post('/api/signup', async (req, res) => {
     try {
-        const { name, email, password, phone, company, job_title, domain } = req.body;
+        const { name, email, phone, company, job_title, domain } = req.body;
 
         // Check if user already exists
         const existingUser = await supabaseService.getUserByEmail(email);
@@ -118,8 +134,19 @@ app.post('/api/signup', async (req, res) => {
             return res.status(400).json({ error: 'Email already exists' });
         }
 
-        const newUser = await supabaseService.createUser(name, email, password, 'USER', phone, company, job_title, domain);
-        res.json(newUser);
+        // Generate temporary password
+        const tempPassword = generateTempPassword();
+
+        const newUser = await supabaseService.createUser(
+            name, email, tempPassword, 'USER',
+            phone, company, job_title, domain,
+            null, false, true // must_change_password = true
+        );
+
+        // Send temporary password email
+        await brevoService.sendTemporaryPasswordEmail(email, name, tempPassword);
+
+        res.json({ ...newUser, emailSent: true });
     } catch (error) {
         console.error('Signup error:', error);
         res.status(500).json({ error: error.message });
@@ -144,6 +171,316 @@ app.delete('/api/users/:id', async (req, res) => {
         res.json({ message: 'User deleted successfully' });
     } catch (error) {
         console.error('Delete user error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post('/api/admin/users/bulk', async (req, res) => {
+    try {
+        const { users } = req.body;
+        if (!users || !Array.isArray(users)) {
+            return res.status(400).json({ error: 'Invalid users data' });
+        }
+
+        const results = {
+            total: users.length,
+            success: 0,
+            failed: 0,
+            errors: []
+        };
+
+        for (const userData of users) {
+            try {
+                const { name, email, role, phone, company, job_title, domain } = userData;
+                
+                // Check if user already exists
+                const existingUser = await supabaseService.getUserByEmail(email);
+                if (existingUser) {
+                    results.failed++;
+                    results.errors.push({ email, error: 'Email already exists' });
+                    continue;
+                }
+
+                // Generate temporary password for each user
+                const tempPassword = generateTempPassword();
+
+                await supabaseService.createUser(
+                    name, 
+                    email, 
+                    tempPassword,
+                    role || 'USER', 
+                    phone, 
+                    company, 
+                    job_title, 
+                    domain,
+                    null, false, true // must_change_password = true
+                );
+
+                // Send temporary password email (non-blocking)
+                brevoService.sendTemporaryPasswordEmail(email, name, tempPassword)
+                    .catch(err => console.error(`Failed to send email to ${email}:`, err.message));
+
+                results.success++;
+            } catch (err) {
+                results.failed++;
+                results.errors.push({ email: userData.email, error: err.message });
+            }
+        }
+
+        res.json(results);
+    } catch (error) {
+        console.error('Bulk user creation error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
+// Password Management & Forgot Password
+// ============================================
+
+// Change password (for logged-in users / first-time password change)
+app.put('/api/users/:id/password', async (req, res) => {
+    try {
+        const userId = parseInt(req.params.id);
+        const { currentPassword, newPassword } = req.body;
+
+        if (!newPassword || newPassword.length < 8) {
+            return res.status(400).json({ error: 'New password must be at least 8 characters' });
+        }
+
+        // Verify current password
+        const { data: user, error: fetchError } = await supabaseService.supabase
+            .from('users')
+            .select('password')
+            .eq('id', userId)
+            .single();
+
+        if (fetchError || !user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        if (user.password !== currentPassword) {
+            return res.status(401).json({ error: 'Current password is incorrect' });
+        }
+
+        await supabaseService.updateUserPassword(userId, newPassword);
+        res.json({ message: 'Password updated successfully' });
+    } catch (error) {
+        console.error('Change password error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Request forgot password OTP
+app.post('/api/auth/forgot-password', async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) return res.status(400).json({ error: 'Email is required' });
+
+        const user = await supabaseService.getUserByEmail(email);
+        if (!user) {
+            // Don't reveal if email exists or not for security
+            return res.json({ message: 'If the email exists, an OTP has been sent' });
+        }
+
+        const otp = generateOtp();
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes
+
+        await supabaseService.setUserOtp(email, otp, expiresAt);
+        await brevoService.sendOtpEmail(email, user.name, otp);
+
+        res.json({ message: 'OTP sent to your email' });
+    } catch (error) {
+        console.error('Forgot password error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Verify OTP
+app.post('/api/auth/verify-otp', async (req, res) => {
+    try {
+        const { email, otp } = req.body;
+        if (!email || !otp) return res.status(400).json({ error: 'Email and OTP are required' });
+
+        const user = await supabaseService.getUserByEmail(email);
+        if (!user) {
+            return res.status(400).json({ error: 'Invalid email or OTP' });
+        }
+
+        if (!user.otp_code || user.otp_code !== otp) {
+            return res.status(400).json({ error: 'Invalid OTP' });
+        }
+
+        if (new Date(user.otp_expires_at) < new Date()) {
+            await supabaseService.clearUserOtp(email);
+            return res.status(400).json({ error: 'OTP has expired. Please request a new one.' });
+        }
+
+        res.json({ message: 'OTP verified successfully', verified: true });
+    } catch (error) {
+        console.error('Verify OTP error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Reset password with OTP
+app.post('/api/auth/reset-password', async (req, res) => {
+    try {
+        const { email, otp, newPassword } = req.body;
+        if (!email || !otp || !newPassword) {
+            return res.status(400).json({ error: 'Email, OTP, and new password are required' });
+        }
+
+        if (newPassword.length < 8) {
+            return res.status(400).json({ error: 'Password must be at least 8 characters' });
+        }
+
+        const user = await supabaseService.getUserByEmail(email);
+        if (!user || !user.otp_code || user.otp_code !== otp) {
+            return res.status(400).json({ error: 'Invalid email or OTP' });
+        }
+
+        if (new Date(user.otp_expires_at) < new Date()) {
+            await supabaseService.clearUserOtp(email);
+            return res.status(400).json({ error: 'OTP has expired' });
+        }
+
+        await supabaseService.updateUserPasswordByEmail(email, newPassword);
+        res.json({ message: 'Password reset successfully' });
+    } catch (error) {
+        console.error('Reset password error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
+// Organization Endpoints
+// ============================================
+
+app.post('/api/organizations', async (req, res) => {
+    try {
+        const { name } = req.body;
+        if (!name) return res.status(400).json({ error: 'Missing organization name' });
+        const org = await supabaseService.createOrganization(name);
+        res.json(org);
+    } catch (error) {
+        console.error('Create organization error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/organizations', async (req, res) => {
+    try {
+        const orgs = await supabaseService.getOrganizations();
+        res.json(orgs);
+    } catch (error) {
+        console.error('Get organizations error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.delete('/api/organizations/:id', async (req, res) => {
+    try {
+        await supabaseService.deleteOrganization(req.params.id);
+        res.json({ message: 'Organization deleted' });
+    } catch (error) {
+        console.error('Delete organization error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/organizations/:id/users', async (req, res) => {
+    try {
+        const users = await supabaseService.getUsersByOrganization(req.params.id);
+        res.json(users);
+    } catch (error) {
+        console.error('Get organization users error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
+// User Organization & Superuser Endpoints
+// ============================================
+
+app.put('/api/users/:id/organization', async (req, res) => {
+    try {
+        const userId = parseInt(req.params.id);
+        const { organizationId } = req.body;
+        await supabaseService.updateUserOrganization(userId, organizationId);
+        res.json({ message: 'User organization updated' });
+    } catch (error) {
+        console.error('Update user organization error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.put('/api/users/:id/superuser', async (req, res) => {
+    try {
+        const userId = parseInt(req.params.id);
+        const { isSuperuser } = req.body;
+        await supabaseService.updateUserSuperuser(userId, isSuperuser);
+        res.json({ message: 'User superuser status updated' });
+    } catch (error) {
+        console.error('Update user superuser error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
+// Dashboard Access Sharing Endpoints
+// ============================================
+
+app.post('/api/dashboards/:id/access', async (req, res) => {
+    try {
+        const dashboardId = parseInt(req.params.id);
+        const { userId, accessLevel, grantedBy } = req.body;
+        if (!userId || !accessLevel || !grantedBy) {
+            return res.status(400).json({ error: 'Missing userId, accessLevel, or grantedBy' });
+        }
+        const result = await supabaseService.grantDashboardAccess(dashboardId, userId, accessLevel, grantedBy);
+        res.json(result);
+    } catch (error) {
+        console.error('Grant dashboard access error:', error);
+        const status = error.message.includes('owner') || error.message.includes('co-owner') ? 403 : 500;
+        res.status(status).json({ error: error.message });
+    }
+});
+
+app.delete('/api/dashboards/:id/access/:userId', async (req, res) => {
+    try {
+        const dashboardId = parseInt(req.params.id);
+        const userId = parseInt(req.params.userId);
+        const requestingUserId = parseInt(req.query.requestingUserId);
+        if (!requestingUserId) return res.status(400).json({ error: 'Missing requestingUserId' });
+        await supabaseService.revokeDashboardAccess(dashboardId, userId, requestingUserId);
+        res.json({ message: 'Access revoked' });
+    } catch (error) {
+        console.error('Revoke dashboard access error:', error);
+        const status = error.message.includes('owner') || error.message.includes('co-owner') ? 403 : 500;
+        res.status(status).json({ error: error.message });
+    }
+});
+
+app.get('/api/dashboards/:id/access', async (req, res) => {
+    try {
+        const dashboardId = parseInt(req.params.id);
+        const accessList = await supabaseService.getDashboardAccessList(dashboardId);
+        res.json(accessList);
+    } catch (error) {
+        console.error('Get dashboard access error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/dashboards/shared', async (req, res) => {
+    try {
+        const userId = parseInt(req.query.userId);
+        if (!userId) return res.status(400).json({ error: 'Missing userId' });
+        const dashboards = await supabaseService.getSharedDashboards(userId);
+        res.json(dashboards);
+    } catch (error) {
+        console.error('Get shared dashboards error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -262,11 +599,11 @@ app.get('/api/admin/dashboards', async (req, res) => {
 // Create a workspace folder
 app.post('/api/workspace/folders', async (req, res) => {
     try {
-        const { ownerId, name, accessUserIds = [] } = req.body;
+        const { ownerId, name, accessUsers = [], accessGroups = [] } = req.body;
         if (!ownerId || !name) {
             return res.status(400).json({ error: 'Missing ownerId or name' });
         }
-        const folder = await supabaseService.createWorkspaceFolder(ownerId, name, accessUserIds);
+        const folder = await supabaseService.createWorkspaceFolder(ownerId, name, accessUsers, accessGroups);
         res.json(folder);
     } catch (error) {
         console.error('Create workspace folder error:', error);
@@ -291,11 +628,11 @@ app.get('/api/workspace/folders', async (req, res) => {
 app.put('/api/workspace/folders/:id', async (req, res) => {
     try {
         const folderId = req.params.id;
-        const { name, accessUserIds = [], requestingUserId } = req.body;
+        const { name, accessUsers = [], accessGroups = [], requestingUserId } = req.body;
         if (!name || !requestingUserId) {
             return res.status(400).json({ error: 'Missing name or requestingUserId' });
         }
-        await supabaseService.updateWorkspaceFolder(folderId, name, accessUserIds, requestingUserId);
+        await supabaseService.updateWorkspaceFolder(folderId, name, accessUsers, accessGroups, requestingUserId);
         res.json({ message: 'Folder updated' });
     } catch (error) {
         console.error('Update workspace folder error:', error);
@@ -319,17 +656,81 @@ app.delete('/api/workspace/folders/:id', async (req, res) => {
     }
 });
 
-// Get dashboards inside a folder
-app.get('/api/workspace/folders/:folderId/dashboards', async (req, res) => {
+// Get dashboards in a folder (access checked)
+app.get('/api/workspace/folders/:id/dashboards', async (req, res) => {
     try {
-        const { folderId } = req.params;
+        const folderId = req.params.id;
         const userId = parseInt(req.query.userId);
         if (!userId) return res.status(400).json({ error: 'Missing userId' });
-        const dashboards = await supabaseService.getWorkspaceDashboardsByFolder(folderId, userId);
-        res.json(dashboards);
+        const result = await supabaseService.getFolderDashboards(folderId, userId);
+        res.json(result);
     } catch (error) {
         console.error('Get folder dashboards error:', error);
-        const status = error.message.includes('Access denied') ? 403 : 500;
+        const status = error.message.toLowerCase().includes('access denied') ? 403 : 500;
+        res.status(status).json({ error: error.message });
+    }
+});
+
+// ============================================
+// Workspace Group Endpoints
+// ============================================
+
+// Create a workspace group
+app.post('/api/workspace/groups', async (req, res) => {
+    try {
+        const { ownerId, name, userIds = [] } = req.body;
+        if (!ownerId || !name) {
+            return res.status(400).json({ error: 'Missing ownerId or name' });
+        }
+        const group = await supabaseService.createWorkspaceGroup(ownerId, name, userIds);
+        res.json(group);
+    } catch (error) {
+        console.error('Create workspace group error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get all groups created by a user
+app.get('/api/workspace/groups', async (req, res) => {
+    try {
+        const userId = parseInt(req.query.userId);
+        if (!userId) return res.status(400).json({ error: 'Missing userId' });
+        const groups = await supabaseService.getWorkspaceGroups(userId);
+        res.json(groups);
+    } catch (error) {
+        console.error('Get workspace groups error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Update a workspace group
+app.put('/api/workspace/groups/:id', async (req, res) => {
+    try {
+        const groupId = req.params.id;
+        const { name, userIds = [], requestingUserId } = req.body;
+        if (!name || !requestingUserId) {
+            return res.status(400).json({ error: 'Missing name or requestingUserId' });
+        }
+        await supabaseService.updateWorkspaceGroup(groupId, name, userIds, requestingUserId);
+        res.json({ message: 'Group updated' });
+    } catch (error) {
+        console.error('Update workspace group error:', error);
+        const status = error.message.includes('owner') ? 403 : 500;
+        res.status(status).json({ error: error.message });
+    }
+});
+
+// Delete a workspace group
+app.delete('/api/workspace/groups/:id', async (req, res) => {
+    try {
+        const groupId = req.params.id;
+        const requestingUserId = parseInt(req.query.userId);
+        if (!requestingUserId) return res.status(400).json({ error: 'Missing userId' });
+        await supabaseService.deleteWorkspaceGroup(groupId, requestingUserId);
+        res.json({ message: 'Group deleted' });
+    } catch (error) {
+        console.error('Delete workspace group error:', error);
+        const status = error.message.includes('owner') ? 403 : 500;
         res.status(status).json({ error: error.message });
     }
 });
@@ -1857,6 +2258,386 @@ app.delete('/api/admin/api-errors/resolved', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
+// ============================================
+// Scheduled Refresh Endpoints
+// ============================================
+
+/**
+ * Get refresh schedule for a dashboard
+ */
+app.get('/api/dashboards/:id/refresh-schedule', async (req, res) => {
+    try {
+        const dashboardId = parseInt(req.params.id);
+        const schedule = await supabaseService.getRefreshSchedule(dashboardId);
+        res.json(schedule || null);
+    } catch (error) {
+        console.error('Get refresh schedule error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * Create or update refresh schedule for a dashboard
+ */
+app.post('/api/dashboards/:id/refresh-schedule', async (req, res) => {
+    try {
+        const dashboardId = parseInt(req.params.id);
+        const { userId, sourceType, sourceCredentials, refreshFrequency, refreshTimeUtc, refreshDay } = req.body;
+
+        if (!userId || !sourceType || !refreshFrequency || !refreshTimeUtc) {
+            return res.status(400).json({ error: 'Missing required fields: userId, sourceType, refreshFrequency, refreshTimeUtc' });
+        }
+
+        // Verify user is admin or dashboard owner
+        const { data: dashboard } = await supabaseService.supabase
+            .from('dashboards')
+            .select('user_id')
+            .eq('id', dashboardId)
+            .single();
+
+        if (!dashboard) {
+            return res.status(404).json({ error: 'Dashboard not found' });
+        }
+
+        const { data: user } = await supabaseService.supabase
+            .from('users')
+            .select('role, is_superuser')
+            .eq('id', userId)
+            .single();
+
+        if (dashboard.user_id !== userId && user?.role !== 'ADMIN' && !user?.is_superuser) {
+            return res.status(403).json({ error: 'Only dashboard owner or admin can set refresh schedule' });
+        }
+
+        const schedule = await supabaseService.createRefreshSchedule(
+            dashboardId,
+            userId,
+            sourceType,
+            sourceCredentials || {},
+            refreshFrequency,
+            refreshTimeUtc,
+            refreshDay || null
+        );
+
+        res.json(schedule);
+    } catch (error) {
+        console.error('Create refresh schedule error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * Delete refresh schedule for a dashboard
+ */
+app.delete('/api/dashboards/:id/refresh-schedule', async (req, res) => {
+    try {
+        const dashboardId = parseInt(req.params.id);
+        const userId = parseInt(req.query.userId);
+
+        if (!userId) return res.status(400).json({ error: 'Missing userId' });
+
+        // Verify user is admin or dashboard owner
+        const { data: dashboard } = await supabaseService.supabase
+            .from('dashboards')
+            .select('user_id')
+            .eq('id', dashboardId)
+            .single();
+
+        if (!dashboard) return res.status(404).json({ error: 'Dashboard not found' });
+
+        const { data: user } = await supabaseService.supabase
+            .from('users')
+            .select('role, is_superuser')
+            .eq('id', userId)
+            .single();
+
+        if (dashboard.user_id !== userId && user?.role !== 'ADMIN' && !user?.is_superuser) {
+            return res.status(403).json({ error: 'Only dashboard owner or admin can delete refresh schedule' });
+        }
+
+        await supabaseService.deleteRefreshSchedule(dashboardId);
+        res.json({ message: 'Refresh schedule deleted' });
+    } catch (error) {
+        console.error('Delete refresh schedule error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * Test a data source connection for scheduled refresh
+ */
+app.post('/api/refresh-schedule/test-connection', async (req, res) => {
+    try {
+        const { sourceType, sourceCredentials } = req.body;
+
+        if (!sourceType) {
+            return res.status(400).json({ error: 'Missing sourceType' });
+        }
+
+        if (sourceType === 'google_sheet') {
+            const { spreadsheetId, sheetNames } = sourceCredentials || {};
+            if (!spreadsheetId) {
+                return res.status(400).json({ error: 'Missing spreadsheetId' });
+            }
+            const metadata = await googleSheetsService.getMetadata(spreadsheetId);
+            return res.json({ success: true, message: `Connected to "${metadata.title}"`, metadata });
+        }
+
+        if (sourceType === 'sql_database') {
+            const result = await dbConnectorService.testConnection(sourceCredentials);
+            return res.json(result);
+        }
+
+        if (sourceType === 'sharepoint') {
+            // SharePoint uses service account - test connectivity
+            if (!sharepointService.isConfigured()) {
+                return res.json({ success: false, message: 'SharePoint is not configured on the server' });
+            }
+            await sharepointService.getAccessToken();
+            return res.json({ success: true, message: 'SharePoint connection successful' });
+        }
+
+        return res.status(400).json({ error: `Unknown source type: ${sourceType}` });
+    } catch (error) {
+        console.error('Test connection error:', error);
+        res.json({ success: false, message: error.message });
+    }
+});
+
+/**
+ * Manually trigger a refresh for a dashboard
+ */
+app.post('/api/dashboards/:id/refresh-now', async (req, res) => {
+    try {
+        const dashboardId = parseInt(req.params.id);
+        const { userId } = req.body;
+
+        if (!userId) return res.status(400).json({ error: 'Missing userId' });
+
+        const schedule = await supabaseService.getRefreshSchedule(dashboardId);
+        if (!schedule) return res.status(404).json({ error: 'No refresh schedule found for this dashboard' });
+
+        // Execute refresh
+        await executeRefresh(schedule);
+
+        // Get updated schedule
+        const updatedSchedule = await supabaseService.getRefreshSchedule(dashboardId);
+        res.json({ message: 'Refresh completed', schedule: updatedSchedule });
+    } catch (error) {
+        console.error('Manual refresh error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
+// Scheduled Refresh Engine
+// ============================================
+
+/**
+ * Execute a single refresh: fetch fresh data from source, update dashboard data_model
+ */
+async function executeRefresh(schedule) {
+    const { dashboard_id, source_type, source_credentials } = schedule;
+    console.log(`⏰ [Refresh] Executing refresh for dashboard ${dashboard_id} (source: ${source_type})`);
+
+    // Mark as running
+    await supabaseService.updateLastRefresh(dashboard_id, 'running');
+
+    try {
+        let freshData = null;
+        let sheetsToProcess = [];
+
+        // 1. Fetch raw data based on source type
+        if (source_type === 'google_sheet') {
+            const { spreadsheetId, sheetNames } = source_credentials;
+            if (!spreadsheetId || !sheetNames || sheetNames.length === 0) {
+                throw new Error('Missing spreadsheetId or sheetNames in credentials');
+            }
+
+            for (const sheetName of sheetNames) {
+                const rows = await googleSheetsService.getSheetData(spreadsheetId, sheetName);
+                sheetsToProcess.push({ name: sheetName, data: rows });
+            }
+        } else if (source_type === 'sql_database') {
+            const { engine, host, port, user, password, database, tableName } = source_credentials;
+            if (!engine || !host || !database || !user || !tableName) {
+                throw new Error('Missing SQL connection credentials');
+            }
+
+            const tableData = await dbConnectorService.getTableData(
+                { engine, host, port, user, password, database },
+                tableName
+            );
+            
+            if (tableData.rows && tableData.rows.length > 0) {
+                sheetsToProcess.push({ name: tableName, data: tableData.rows });
+            }
+        } else if (source_type === 'sharepoint') {
+            const { siteId, listId } = source_credentials;
+            if (!siteId || !listId) {
+                throw new Error('Missing SharePoint siteId or listId in credentials');
+            }
+
+            const result = await sharepointService.importList(siteId, listId);
+            if (result.data && result.data.length > 0) {
+                sheetsToProcess.push({ name: 'Sheet1', data: result.data });
+            }
+        } else {
+            throw new Error(`Unsupported source type: ${source_type}`);
+        }
+
+        // 2. Process data and reconstruct DataModel
+        const { data: dashboard } = await supabaseService.supabase
+            .from('dashboards')
+            .select('data_model')
+            .eq('id', dashboard_id)
+            .single();
+
+        if (dashboard && dashboard.data_model && sheetsToProcess.length > 0) {
+            const dataProcessing = require('./utils/dataProcessing');
+            const dataModel = dashboard.data_model;
+            let finalRows = [];
+
+            // Handle Multi-sheet Join Scenario
+            if (dataModel.joinConfigs && dataModel.joinConfigs.length > 0 && dataModel.tableConfigs) {
+                const tables = [];
+                Object.entries(dataModel.tableConfigs).forEach(([tableId, config]) => {
+                    const refreshedSheet = sheetsToProcess.find(s => s.name === config.name);
+                    if (refreshedSheet) {
+                        tables.push({
+                            id: tableId,
+                            name: refreshedSheet.name,
+                            rawData: { 
+                                headers: refreshedSheet.data[config.headerIndex] || [], 
+                                rows: refreshedSheet.data 
+                            }
+                        });
+                    }
+                });
+
+                const headerIndices = {};
+                Object.entries(dataModel.tableConfigs).forEach(([id, cfg]) => {
+                    headerIndices[id] = cfg.headerIndex;
+                });
+
+                const joinResult = dataProcessing.performJoins(tables, dataModel.joinConfigs, headerIndices, dataModel.appendConfigs || []);
+                finalRows = joinResult.data;
+            } else {
+                // Single-sheet fallback
+                const headerIdx = dataModel.headerIndex || 0;
+                const primarySheet = sheetsToProcess[0];
+                const rawDataObj = {
+                    headers: primarySheet.data[headerIdx] || [],
+                    rows: primarySheet.data
+                };
+                const { rows } = dataProcessing.processRawData(rawDataObj, headerIdx);
+                finalRows = rows;
+            }
+
+            // Map refreshed data to ProcessedRow objects maintaining strictly original columns
+            const newProcessedData = finalRows.map(row => {
+                const obj = {};
+                dataModel.columns.forEach(col => {
+                    const val = row[col];
+                    if (dataModel.numericColumns && dataModel.numericColumns.includes(col)) {
+                        const num = Number(val);
+                        obj[col] = (val === '' || val === null || val === undefined || isNaN(num)) ? 0 : num;
+                    } else {
+                        obj[col] = (val === null || val === undefined) ? '' : String(val);
+                    }
+                });
+                return obj;
+            });
+
+            freshData = { ...dataModel };
+            freshData.data = newProcessedData;
+        }
+
+        if (freshData) {
+            await supabaseService.updateDashboardDataModel(dashboard_id, freshData);
+            await supabaseService.updateLastRefresh(dashboard_id, 'success');
+            console.log(`✅ [Refresh] Dashboard ${dashboard_id} refreshed successfully`);
+        } else {
+            throw new Error('No fresh data could be fetched');
+        }
+    } catch (error) {
+        console.error(`❌ [Refresh] Failed to refresh dashboard ${dashboard_id}:`, error.message);
+        await supabaseService.updateLastRefresh(dashboard_id, 'failed', error.message);
+    }
+}
+
+/**
+ * Determines if a schedule is due for refresh based on its frequency and last refresh time
+ */
+function isScheduleDue(schedule) {
+    const now = new Date();
+    const lastRefresh = schedule.last_refreshed_at ? new Date(schedule.last_refreshed_at) : null;
+
+    // Parse schedule time parts
+    const [schedHours, schedMinutes] = (schedule.refresh_time_utc || '00:00').split(':').map(Number);
+    const currentUTCHours = now.getUTCHours();
+    const currentUTCMinutes = now.getUTCMinutes();
+    const currentUTCDay = now.getUTCDay(); // 0=Sunday
+
+    // Check if we are within the refresh window (within 2 minutes of scheduled time)
+    const isInTimeWindow = currentUTCHours === schedHours && Math.abs(currentUTCMinutes - schedMinutes) <= 1;
+
+    if (!lastRefresh) {
+        // Never been refreshed, only run if in time window
+        return isInTimeWindow;
+    }
+
+    const timeSinceLastRefresh = now.getTime() - lastRefresh.getTime();
+    const hoursSinceLastRefresh = timeSinceLastRefresh / (1000 * 60 * 60);
+
+    switch (schedule.refresh_frequency) {
+        case 'hourly':
+            return hoursSinceLastRefresh >= 1;
+        case 'every_6_hours':
+            return hoursSinceLastRefresh >= 6 && isInTimeWindow;
+        case 'daily':
+            return hoursSinceLastRefresh >= 23 && isInTimeWindow;
+        case 'weekly':
+            if (schedule.refresh_day !== null && schedule.refresh_day !== undefined) {
+                return hoursSinceLastRefresh >= 167 && currentUTCDay === schedule.refresh_day && isInTimeWindow;
+            }
+            return hoursSinceLastRefresh >= 167 && isInTimeWindow;
+        default:
+            return false;
+    }
+}
+
+/**
+ * Server-side scheduler: polls every 60 seconds for due refresh schedules
+ */
+let schedulerRunning = false;
+async function runScheduler() {
+    if (schedulerRunning) return;
+    schedulerRunning = true;
+
+    try {
+        const schedules = await supabaseService.getDueSchedules();
+        
+        for (const schedule of schedules) {
+            if (isScheduleDue(schedule)) {
+                console.log(`⏰ [Scheduler] Dashboard ${schedule.dashboard_id} is due for refresh`);
+                // Run refresh asynchronously (don't block the loop)
+                executeRefresh(schedule).catch(err => {
+                    console.error(`[Scheduler] Error refreshing dashboard ${schedule.dashboard_id}:`, err.message);
+                });
+            }
+        }
+    } catch (error) {
+        console.error('[Scheduler] Error in scheduler loop:', error.message);
+    } finally {
+        schedulerRunning = false;
+    }
+}
+
+// Start the scheduler interval (every 60 seconds)
+setInterval(runScheduler, 60000);
+console.log('⏰ Scheduled refresh engine started (polling every 60s)');
 
 app.listen(port, () => {
     console.log(`Server running on port ${port} with Supabase integration`);
