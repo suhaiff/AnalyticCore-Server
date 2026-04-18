@@ -570,6 +570,20 @@ app.get('/api/dashboards', async (req, res) => {
     }
 });
 
+// Get a single dashboard by id (used for live polling of refreshed data)
+app.get('/api/dashboards/:id', async (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        if (!id || isNaN(id)) return res.status(400).json({ error: 'Invalid dashboard id' });
+        const dashboard = await supabaseService.getDashboardById(id);
+        if (!dashboard) return res.status(404).json({ error: 'Dashboard not found' });
+        res.json(dashboard);
+    } catch (error) {
+        console.error('Get dashboard by id error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.delete('/api/dashboards/:id', async (req, res) => {
     try {
         const id = parseInt(req.params.id);
@@ -2457,6 +2471,7 @@ async function executeRefresh(schedule) {
 
             for (const sheetName of sheetNames) {
                 const rows = await googleSheetsService.getSheetData(spreadsheetId, sheetName);
+                console.log(`⏰ [Refresh] Fetched ${rows.length} rows from sheet "${sheetName}"`);
                 sheetsToProcess.push({ name: sheetName, data: rows });
             }
         } else if (source_type === 'sql_database') {
@@ -2555,6 +2570,7 @@ async function executeRefresh(schedule) {
         }
 
         if (freshData) {
+            console.log(`⏰ [Refresh] Updating dashboard ${dashboard_id} with ${freshData.data ? freshData.data.length : 0} processed rows`);
             await supabaseService.updateDashboardDataModel(dashboard_id, freshData);
             await supabaseService.updateLastRefresh(dashboard_id, 'success');
             console.log(`✅ [Refresh] Dashboard ${dashboard_id} refreshed successfully`);
@@ -2568,44 +2584,78 @@ async function executeRefresh(schedule) {
 }
 
 /**
- * Determines if a schedule is due for refresh based on its frequency and last refresh time
+ * Determines if a schedule is due for refresh.
+ *
+ * Approach: compute the most recent scheduled "tick" time (the moment the
+ * schedule should have fired based on its frequency + configured time), then
+ * fire if we haven't refreshed at or after that tick. This makes the scheduler
+ * robust to:
+ *   - Manual "Refresh Now" clicks earlier the same day (won't delay the tick).
+ *   - Scheduler downtime (catch-up on restart within the grace window).
+ *   - Polling frequency (scheduler loop runs every 60s; we fire as soon as
+ *     the tick is reached instead of requiring exact minute match).
  */
-function isScheduleDue(schedule) {
-    const now = new Date();
-    const lastRefresh = schedule.last_refreshed_at ? new Date(schedule.last_refreshed_at) : null;
-
-    // Parse schedule time parts
-    const [schedHours, schedMinutes] = (schedule.refresh_time_utc || '00:00').split(':').map(Number);
-    const currentUTCHours = now.getUTCHours();
-    const currentUTCMinutes = now.getUTCMinutes();
-    const currentUTCDay = now.getUTCDay(); // 0=Sunday
-
-    // Check if we are within the refresh window (within 2 minutes of scheduled time)
-    const isInTimeWindow = currentUTCHours === schedHours && Math.abs(currentUTCMinutes - schedMinutes) <= 2;
-
-    if (!lastRefresh) {
-        // Never been refreshed, only run if in time window
-        return isInTimeWindow;
-    }
-
-    const timeSinceLastRefresh = now.getTime() - lastRefresh.getTime();
-    const hoursSinceLastRefresh = timeSinceLastRefresh / (1000 * 60 * 60);
+function computeLastScheduledTick(schedule, now) {
+    const [schedH, schedM] = (schedule.refresh_time_utc || '00:00').split(':').map(Number);
+    const tick = new Date(now);
+    tick.setUTCSeconds(0, 0);
 
     switch (schedule.refresh_frequency) {
-        case 'hourly':
-            return hoursSinceLastRefresh >= 1;
-        case 'every_6_hours':
-            return hoursSinceLastRefresh >= 6 && isInTimeWindow;
-        case 'daily':
-            return hoursSinceLastRefresh >= 23 && isInTimeWindow;
-        case 'weekly':
-            if (schedule.refresh_day !== null && schedule.refresh_day !== undefined) {
-                return hoursSinceLastRefresh >= 167 && currentUTCDay === schedule.refresh_day && isInTimeWindow;
-            }
-            return hoursSinceLastRefresh >= 167 && isInTimeWindow;
+        case 'hourly': {
+            // Fires every hour at :schedM minutes (UTC)
+            tick.setUTCMinutes(schedM);
+            if (tick > now) tick.setUTCHours(tick.getUTCHours() - 1);
+            return tick;
+        }
+        case 'every_6_hours': {
+            // Fires every 6 hours at :schedM minutes, aligned to 00:00 UTC
+            tick.setUTCMinutes(schedM);
+            const misaligned = tick.getUTCHours() % 6;
+            tick.setUTCHours(tick.getUTCHours() - misaligned);
+            if (tick > now) tick.setUTCHours(tick.getUTCHours() - 6);
+            return tick;
+        }
+        case 'daily': {
+            // Fires every day at schedH:schedM UTC
+            tick.setUTCHours(schedH, schedM);
+            if (tick > now) tick.setUTCDate(tick.getUTCDate() - 1);
+            return tick;
+        }
+        case 'weekly': {
+            // Fires weekly on refresh_day (0=Sun..6=Sat) at schedH:schedM UTC.
+            tick.setUTCHours(schedH, schedM);
+            const currentDay = tick.getUTCDay();
+            const schedDay = (schedule.refresh_day !== null && schedule.refresh_day !== undefined)
+                ? schedule.refresh_day
+                : currentDay;
+            const daysBehind = (currentDay - schedDay + 7) % 7;
+            tick.setUTCDate(tick.getUTCDate() - daysBehind);
+            if (tick > now) tick.setUTCDate(tick.getUTCDate() - 7);
+            return tick;
+        }
         default:
-            return false;
+            return null;
     }
+}
+
+function isScheduleDue(schedule) {
+    const now = new Date();
+    const lastTick = computeLastScheduledTick(schedule, now);
+    if (!lastTick) return false;
+
+    // The tick is always <= now by construction (we rewind if it was in the future).
+    // Fire only if we haven't already refreshed at or after this tick.
+    const lastRefresh = schedule.last_refreshed_at ? new Date(schedule.last_refreshed_at) : null;
+    if (lastRefresh && lastRefresh.getTime() >= lastTick.getTime()) return false;
+
+    // Catch-up grace window: if the tick is older than this and we never fired,
+    // skip it to avoid surprise refreshes after long downtimes. The next tick
+    // will fire normally.
+    const GRACE_SECONDS = 60 * 60; // 1 hour
+    const secondsLate = (now.getTime() - lastTick.getTime()) / 1000;
+    if (secondsLate > GRACE_SECONDS) return false;
+
+    return true;
 }
 
 /**
@@ -2636,9 +2686,12 @@ async function runScheduler() {
     }
 }
 
-// Start the scheduler interval (every 60 seconds)
-setInterval(runScheduler, 60000);
-console.log('⏰ Scheduled refresh engine started (polling every 60s)');
+// Start the scheduler: run immediately on startup, then every 30 seconds.
+// A 30s cadence gives at-most-30s delay from the scheduled tick to execution.
+const SCHEDULER_INTERVAL_MS = 30 * 1000;
+runScheduler().catch(err => console.error('[Scheduler] Startup run failed:', err.message));
+setInterval(runScheduler, SCHEDULER_INTERVAL_MS);
+console.log(`⏰ Scheduled refresh engine started (polling every ${SCHEDULER_INTERVAL_MS / 1000}s)`);
 
 app.listen(port, () => {
     console.log(`Server running on port ${port} with Supabase integration`);

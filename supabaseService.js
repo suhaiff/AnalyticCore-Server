@@ -281,6 +281,47 @@ class SupabaseService {
         }
     }
 
+    async getDashboardById(dashboardId) {
+        try {
+            const { data: dashboard, error } = await this.supabase
+                .from('dashboards')
+                .select('*')
+                .eq('id', dashboardId)
+                .single();
+
+            if (error) throw error;
+            if (!dashboard) return null;
+
+            const raw = dashboard.chart_configs;
+            let chartConfigs, sections, filterColumns;
+            if (raw && !Array.isArray(raw) && raw.charts) {
+                chartConfigs = raw.charts || [];
+                sections = raw.sections || [];
+                filterColumns = raw.filterColumns || [];
+            } else {
+                chartConfigs = raw || [];
+                sections = [];
+                filterColumns = [];
+            }
+
+            return {
+                id: dashboard.id.toString(),
+                name: dashboard.name,
+                date: new Date(dashboard.created_at).toLocaleDateString(),
+                dataModel: dashboard.data_model || {},
+                chartConfigs,
+                sections,
+                filterColumns,
+                folder_id: dashboard.folder_id || null,
+                is_workspace: dashboard.is_workspace || false,
+                updated_at: dashboard.updated_at || dashboard.created_at
+            };
+        } catch (error) {
+            console.error('Error fetching dashboard by id:', error.message);
+            throw error;
+        }
+    }
+
     async getDashboardsByUser(userId) {
         try {
             const { data, error } = await this.supabase
@@ -318,7 +359,10 @@ class SupabaseService {
                     sections,
                     filterColumns,
                     folder_id: dashboard.folder_id || null,
-                    is_workspace: dashboard.is_workspace || false
+                    is_workspace: dashboard.is_workspace || false,
+                    // Include user_id so the client can evaluate ownership (Edit/Save/Refresh
+                    // button visibility depends on comparing this to the current user's id).
+                    user_id: dashboard.user_id
                 };
             });
         } catch (error) {
