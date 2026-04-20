@@ -2586,52 +2586,89 @@ async function executeRefresh(schedule) {
 }
 
 /**
- * Determines if a schedule is due for refresh based on its frequency and last refresh time
+ * Computes the most recent scheduled "tick" (<= now) for a given schedule.
+ * All scheduling math is done in UTC because refresh_time_utc is stored in UTC.
+ * Returns a Date, or null if the frequency is unknown.
  */
-function isScheduleDue(schedule) {
-    const now = new Date();
-    const lastRefresh = schedule.last_refreshed_at ? new Date(schedule.last_refreshed_at) : null;
+function computeLastScheduledTick(schedule, now) {
+    const [hStr, mStr] = (schedule.refresh_time_utc || '00:00').split(':');
+    const h = Number(hStr) || 0;
+    const m = Number(mStr) || 0;
 
-    // Parse schedule time parts
-    const [schedHours, schedMinutes] = (schedule.refresh_time_utc || '00:00').split(':').map(Number);
-    const currentUTCHours = now.getUTCHours();
-    const currentUTCMinutes = now.getUTCMinutes();
-    const currentUTCDay = now.getUTCDay(); // 0=Sunday
-
-    // Check if we are within the refresh window (within 2 minutes of scheduled time)
-    const isInTimeWindow = currentUTCHours === schedHours && Math.abs(currentUTCMinutes - schedMinutes) <= 1;
-
-    if (!lastRefresh) {
-        // Never been refreshed, only run if in time window
-        return isInTimeWindow;
-    }
-
-    const timeSinceLastRefresh = now.getTime() - lastRefresh.getTime();
-    const hoursSinceLastRefresh = timeSinceLastRefresh / (1000 * 60 * 60);
+    const MS_HOUR = 60 * 60 * 1000;
+    const MS_DAY = 24 * MS_HOUR;
 
     switch (schedule.refresh_frequency) {
-        case 'hourly':
-            return hoursSinceLastRefresh >= 1;
-        case 'every_6_hours':
-            return hoursSinceLastRefresh >= 6 && isInTimeWindow;
-        case 'daily':
-            return hoursSinceLastRefresh >= 23 && isInTimeWindow;
-        case 'weekly':
-            if (schedule.refresh_day !== null && schedule.refresh_day !== undefined) {
-                return hoursSinceLastRefresh >= 167 && currentUTCDay === schedule.refresh_day && isInTimeWindow;
+        case 'hourly': {
+            // Fires every hour at minute `m`.
+            const tick = new Date(Date.UTC(
+                now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
+                now.getUTCHours(), m, 0, 0
+            ));
+            if (tick.getTime() > now.getTime()) {
+                return new Date(tick.getTime() - MS_HOUR);
             }
-            return hoursSinceLastRefresh >= 167 && isInTimeWindow;
+            return tick;
+        }
+        case 'every_6_hours': {
+            // Anchor at h:m UTC, then every 6 hours from there.
+            let tick = new Date(Date.UTC(
+                now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
+                h % 6, m, 0, 0
+            ));
+            while (tick.getTime() + 6 * MS_HOUR <= now.getTime()) {
+                tick = new Date(tick.getTime() + 6 * MS_HOUR);
+            }
+            if (tick.getTime() > now.getTime()) {
+                tick = new Date(tick.getTime() - 6 * MS_HOUR);
+            }
+            return tick;
+        }
+        case 'daily': {
+            const today = new Date(Date.UTC(
+                now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), h, m, 0, 0
+            ));
+            if (today.getTime() <= now.getTime()) return today;
+            return new Date(today.getTime() - MS_DAY);
+        }
+        case 'weekly': {
+            const targetDow = Number(schedule.refresh_day ?? 0); // 0=Sunday
+            const tick = new Date(Date.UTC(
+                now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), h, m, 0, 0
+            ));
+            const diff = (tick.getUTCDay() - targetDow + 7) % 7;
+            tick.setUTCDate(tick.getUTCDate() - diff);
+            if (tick.getTime() > now.getTime()) {
+                tick.setUTCDate(tick.getUTCDate() - 7);
+            }
+            return tick;
+        }
+        case 'monthly': {
+            const targetDay = Number(schedule.refresh_month_day ?? 1);
+            let tick = new Date(Date.UTC(
+                now.getUTCFullYear(), now.getUTCMonth(), targetDay, h, m, 0, 0
+            ));
+            if (tick.getTime() > now.getTime()) {
+                tick = new Date(Date.UTC(
+                    now.getUTCFullYear(), now.getUTCMonth() - 1, targetDay, h, m, 0, 0
+                ));
+            }
+            return tick;
+        }
         default:
             return null;
     }
 }
 
+/**
+ * Determines if a schedule is due for refresh based on the most recent scheduled
+ * tick and the last successful refresh timestamp.
+ */
 function isScheduleDue(schedule) {
     const now = new Date();
     const lastTick = computeLastScheduledTick(schedule, now);
     if (!lastTick) return false;
 
-    // The tick is always <= now by construction (we rewind if it was in the future).
     // Fire only if we haven't already refreshed at or after this tick.
     const lastRefresh = schedule.last_refreshed_at ? new Date(schedule.last_refreshed_at) : null;
     if (lastRefresh && lastRefresh.getTime() >= lastTick.getTime()) return false;
