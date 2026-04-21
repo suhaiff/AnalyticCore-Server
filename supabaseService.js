@@ -747,11 +747,15 @@ class SupabaseService {
                 const columnCount = rowCount > 0 ? Math.max(...data.map(row => row.length)) : 0;
 
                 const sheetId = await this.createSheet(fileId, name, i, rowCount, columnCount);
-
-                // Insert in batches
-                const batchSize = 100;
-                for (let rowIndex = 0; rowIndex < data.length; rowIndex++) {
-                    await this.createExcelData(sheetId, rowIndex, data[rowIndex]);
+                
+                // Insert data in batches to prevent timeouts
+                const batchSize = 500;
+                for (let j = 0; j < data.length; j += batchSize) {
+                    const chunk = data.slice(j, j + batchSize).map((row, index) => ({
+                        rowIndex: j + index,
+                        rowData: row
+                    }));
+                    await this.createExcelDataBatch(sheetId, chunk);
                 }
             }
 

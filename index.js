@@ -32,6 +32,8 @@ const allowedOrigins = [
     'http://139.59.32.39',  // Digital Ocean Droplet
     'http://139.59.32.39:3001',  // Digital Ocean Droplet with port
     'https://analytic-core.netlify.app',  // Netlify frontend
+    'http://insightai.vtabsquare.com',    // Production domain
+    'https://insightai.vtabsquare.com',   // Production domain (SSL)
     process.env.FRONTEND_URL,  // Environment variable for additional domains
 ].filter(Boolean);  // Remove undefined values
 
@@ -1124,9 +1126,14 @@ app.post('/api/google-sheets/import', async (req, res) => {
                     columnCount
                 );
 
-                // Insert row data
-                for (let rowIndex = 0; rowIndex < data.length; rowIndex++) {
-                    await supabaseService.createExcelData(sheetId, rowIndex, data[rowIndex]);
+                // Insert row data in batches for high performance
+                const batchSize = 500;
+                for (let j = 0; j < data.length; j += batchSize) {
+                    const chunk = data.slice(j, j + batchSize).map((row, index) => ({
+                        rowIndex: j + index,
+                        rowData: row
+                    }));
+                    await supabaseService.createExcelDataBatch(sheetId, chunk);
                 }
 
                 importedResults.push({
@@ -1462,12 +1469,13 @@ app.post('/api/sharepoint/user/import', async (req, res) => {
         );
 
         // Insert row data in batches
-        const batchSize = 100;
-        for (let rowIndex = 0; rowIndex < data.length; rowIndex++) {
-            await supabaseService.createExcelData(sheetId, rowIndex, data[rowIndex]);
-            if ((rowIndex + 1) % batchSize === 0) {
-                console.log(`  Inserted ${rowIndex + 1}/${data.length} rows for SharePoint list`);
-            }
+        const batchSize = 500;
+        for (let j = 0; j < data.length; j += batchSize) {
+            const chunk = data.slice(j, j + batchSize).map((row, index) => ({
+                rowIndex: j + index,
+                rowData: row
+            }));
+            await supabaseService.createExcelDataBatch(sheetId, chunk);
         }
 
         console.log('SharePoint OAuth import completed successfully');
@@ -1602,13 +1610,14 @@ app.post('/api/sharepoint/import', async (req, res) => {
             columnCount
         );
 
-        // 4. Insert row data in batches
-        const batchSize = 100;
-        for (let rowIndex = 0; rowIndex < data.length; rowIndex++) {
-            await supabaseService.createExcelData(sheetId, rowIndex, data[rowIndex]);
-            if ((rowIndex + 1) % batchSize === 0) {
-                console.log(`  Inserted ${rowIndex + 1}/${data.length} rows for SharePoint list`);
-            }
+        // Insert row data in batches
+        const batchSize = 500;
+        for (let j = 0; j < data.length; j += batchSize) {
+            const chunk = data.slice(j, j + batchSize).map((row, index) => ({
+                rowIndex: j + index,
+                rowData: row
+            }));
+            await supabaseService.createExcelDataBatch(sheetId, chunk);
         }
 
         console.log('SharePoint import completed successfully');
@@ -1836,13 +1845,14 @@ app.post('/api/sql/import', async (req, res) => {
             columnCount
         );
 
-        // 4. Insert row data in batches  
-        const batchSize = 100;
-        for (let rowIndex = 0; rowIndex < data.length; rowIndex++) {
-            await supabaseService.createExcelData(sheetId, rowIndex, data[rowIndex]);
-            if ((rowIndex + 1) % batchSize === 0) {
-                console.log(`  Inserted ${rowIndex + 1}/${data.length} rows for SQL table`);
-            }
+        // Insert row data in batches
+        const batchSize = 500;
+        for (let j = 0; j < data.length; j += batchSize) {
+            const chunk = data.slice(j, j + batchSize).map((row, index) => ({
+                rowIndex: j + index,
+                rowData: row
+            }));
+            await supabaseService.createExcelDataBatch(sheetId, chunk);
         }
 
         console.log('SQL import completed successfully');
@@ -1931,8 +1941,13 @@ app.post('/api/sql/import-file', async (req, res) => {
 
             // Insert ALL rows (including header at index 0)
             // This aligns with Excel import where row 0 is usually headers
-            for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
-                await supabaseService.createExcelData(sheetId, rowIndex, rows[rowIndex]);
+            const batchSize = 500;
+            for (let j = 0; j < rows.length; j += batchSize) {
+                const chunk = rows.slice(j, j + batchSize).map((row, index) => ({
+                    rowIndex: j + index,
+                    rowData: row
+                }));
+                await supabaseService.createExcelDataBatch(sheetId, chunk);
             }
 
             importedTables.push({
@@ -2085,10 +2100,14 @@ app.post('/api/sql-db/import', async (req, res) => {
                     columnCount
                 );
 
-                // Insert row data
-                const batchSize = 100;
-                for (let rowIndex = 0; rowIndex < result.rows.length; rowIndex++) {
-                    await supabaseService.createExcelData(sheetId, rowIndex, result.rows[rowIndex]);
+                // Insert row data in batches
+                const batchSize = 500;
+                for (let j = 0; j < result.rows.length; j += batchSize) {
+                    const chunk = result.rows.slice(j, j + batchSize).map((row, index) => ({
+                        rowIndex: j + index,
+                        rowData: row
+                    }));
+                    await supabaseService.createExcelDataBatch(sheetId, chunk);
                 }
 
                 importedResults.push({
@@ -2718,8 +2737,37 @@ runScheduler().catch(err => console.error('[Scheduler] Startup run failed:', err
 setInterval(runScheduler, SCHEDULER_INTERVAL_MS);
 console.log(`⏰ Scheduled refresh engine started (polling every ${SCHEDULER_INTERVAL_MS / 1000}s)`);
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
     console.log(`Server running on port ${port} with Supabase integration`);
     console.log('Supabase Configuration:');
     console.log(`  Project URL: ${supabaseService.supabaseUrl}`);
 });
+
+// Handle 'EADDRINUSE' specifically to provide helpful feedback
+server.on('error', (e) => {
+    if (e.code === 'EADDRINUSE') {
+        console.error(`❌ Error: Port ${port} is already in use.`);
+        console.error(`💡 Try running: fuser -k ${port}/tcp to free the port.`);
+        process.exit(1);
+    } else {
+        console.error('Server error:', e);
+    }
+});
+
+// Graceful Shutdown: Ensure port is released when server stops
+const gracefulShutdown = () => {
+    console.log('\n🛑 Shutting down server gracefully...');
+    server.close(() => {
+        console.log('✅ Server closed. Port released.');
+        process.exit(0);
+    });
+
+    // Force close after 5s if server.close() hangs
+    setTimeout(() => {
+        console.error('⚠️ Could not close connections in time, forcefully shutting down.');
+        process.exit(1);
+    }, 5000);
+};
+
+process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', gracefulShutdown);
