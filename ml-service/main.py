@@ -69,6 +69,12 @@ def _read_tabular(data: bytes, filename: str = "") -> pd.DataFrame:
 
 
 def _infer_problem_type(y: pd.Series, forced: Optional[str]) -> str:
+    # Hard cap: classification on a continuous numeric target with many unique
+    # values creates unusably-large models and almost never reflects user intent.
+    # Override "classification" to "regression" when the target is numeric
+    # with high cardinality, regardless of what the caller requested.
+    if y.dtype.kind in ("i", "u", "f") and y.nunique(dropna=True) > 50:
+        return "regression"
     if forced in ("classification", "regression"):
         return forced
     if y.dtype == "object" or y.dtype.name == "category":
