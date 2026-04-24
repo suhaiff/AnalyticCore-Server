@@ -6,6 +6,8 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const multer = require('multer');
 const fs = require('fs');
+const axios = require('axios');
+const FormData = require('form-data');
 const XLSX = require('xlsx');
 const supabaseService = require('./supabaseService');
 const brevoService = require('./brevoService');
@@ -2604,6 +2606,211 @@ async function executeRefresh(schedule) {
         await supabaseService.updateLastRefresh(dashboard_id, 'failed', error.message);
     }
 }
+
+// ───────────────────────────────────────────────────────────────────────────────
+// ML SERVICE PROXY ROUTES
+// ───────────────────────────────────────────────────────────────────────────────
+const ML_SERVICE_URL = process.env.ML_SERVICE_URL || 'http://localhost:8001';
+
+/**
+ * Proxy health check to ML service
+ */
+app.get('/api/ml/health', async (req, res) => {
+    try {
+        const response = await axios.get(`${ML_SERVICE_URL}/health`);
+        res.json({ ok: true, service: response.data, url: ML_SERVICE_URL });
+    } catch (error) {
+        console.error('ML service health check failed:', error.message);
+        res.status(503).json({
+            ok: false,
+            error: 'ML service unreachable',
+            url: ML_SERVICE_URL,
+            details: error.message
+        });
+    }
+});
+
+/**
+ * Proxy list algorithms
+ */
+app.get('/api/ml/algorithms', async (req, res) => {
+    try {
+        const response = await axios.get(`${ML_SERVICE_URL}/algorithms`);
+        res.json(response.data);
+    } catch (error) {
+        console.error('Failed to fetch algorithms:', error.message);
+        res.status(503).json({ error: 'Failed to fetch algorithms from ML service' });
+    }
+});
+
+/**
+ * Proxy list models for user
+ */
+app.get('/api/ml/models', async (req, res) => {
+    try {
+        const response = await axios.get(`${ML_SERVICE_URL}/models`);
+        
+        // Map Python response to frontend MLModel
+        const models = response.data.map(m => ({
+            ...m,
+            id: m.id || m.model_id,
+            name: m.name || (m.target_column ? `Predict ${m.target_column}` : `Model ${m.model_id.substring(0, 8)}`),
+        }));
+        
+        // Filter by userId if provided
+        const { userId } = req.query;
+        if (userId) {
+            // Wait, models might not have user_id if they were created before.
+            // For now, return all or filter if user_id exists.
+            const filtered = models.filter(m => !m.user_id || String(m.user_id) === String(userId));
+            res.json(filtered);
+        } else {
+            res.json(models);
+        }
+    } catch (error) {
+        console.error('Failed to list models:', error.message);
+        res.status(error.response?.status || 503).json({ error: 'Failed to list models from ML service', details: error.message });
+    }
+});
+
+/**
+ * Proxy get single model
+ */
+app.get('/api/ml/models/:modelId', async (req, res) => {
+    try {
+        const { modelId } = req.params;
+        const { userId } = req.query;
+        if (!userId) return res.status(400).json({ error: 'userId required' });
+        
+        const response = await axios.get(`${ML_SERVICE_URL}/models/${modelId}`, { params: { userId } });
+        
+        const m = response.data;
+        const model = {
+            ...m,
+            id: m.id || m.model_id,
+            name: m.name || (m.target_column ? `Predict ${m.target_column}` : `Model ${m.model_id.substring(0, 8)}`),
+        };
+        
+        res.json(model);
+    } catch (error) {
+        console.error('Failed to get model:', error.message);
+        res.status(error.response?.status || 503).json({ error: 'Failed to get model from ML service' });
+    }
+});
+
+/**
+ * Proxy train model
+ */
+app.post('/api/ml/train', upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) return res.status(400).json({ error: 'File required' });
+        
+        const form = new FormData();
+        form.append('file', fs.createReadStream(req.file.path));
+        
+        // Map camelCase from frontend to snake_case for ML service
+        form.append('target_column', req.body.targetColumn);
+        form.append('algorithm', req.body.algorithm);
+        if (req.body.featureColumns) form.append('feature_columns', req.body.featureColumns);
+        if (req.body.problemType) form.append('problem_type', req.body.problemType);
+        if (req.body.testSize) form.append('test_size', req.body.testSize);
+        if (req.body.modelId) form.append('model_id', req.body.modelId);
+        
+        const response = await axios.post(`${ML_SERVICE_URL}/train`, form, {
+            headers: form.getHeaders(),
+            timeout: 10 * 60 * 1000
+        });
+        
+        // Clean up uploaded file
+        fs.unlink(req.file.path, err => {
+            if (err) console.error('Failed to delete temp file:', err);
+        });
+        
+        const m = response.data;
+        res.json({
+            ...m,
+            id: m.id || m.model_id,
+            name: m.name || req.body.name || (m.target_column ? `Predict ${m.target_column}` : `Model ${m.model_id.substring(0, 8)}`),
+        });
+    } catch (error) {
+        console.error('Failed to train model:', error.message, error.response?.data);
+        // Clean up on error
+        if (req.file) {
+            fs.unlink(req.file.path, err => {
+                if (err) console.error('Failed to delete temp file:', err);
+            });
+        }
+        
+        const mlError = error.response?.data || {};
+        res.status(error.response?.status || 503).json({ 
+            error: 'Failed to train model', 
+            details: error.message,
+            mlError: mlError,
+            detail: mlError.detail || mlError.error || error.message
+        });
+    }
+});
+
+/**
+ * Proxy make predictions
+ */
+app.post('/api/ml/predict', upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) return res.status(400).json({ error: 'File required' });
+        
+        const form = new FormData();
+        form.append('file', fs.createReadStream(req.file.path));
+        form.append('model_id', req.body.modelId);
+        if (req.body.includeProbabilities === 'true' || req.body.includeProbabilities === true) {
+            form.append('include_probabilities', 'true');
+        }
+        
+        const response = await axios.post(`${ML_SERVICE_URL}/predict`, form, {
+            headers: form.getHeaders(),
+            timeout: 10 * 60 * 1000
+        });
+        
+        // Clean up uploaded file
+        fs.unlink(req.file.path, err => {
+            if (err) console.error('Failed to delete temp file:', err);
+        });
+        
+        res.json(response.data);
+    } catch (error) {
+        console.error('Failed to make predictions:', error.message, error.response?.data);
+        // Clean up on error
+        if (req.file) {
+            fs.unlink(req.file.path, err => {
+                if (err) console.error('Failed to delete temp file:', err);
+            });
+        }
+        
+        const mlError = error.response?.data || {};
+        res.status(error.response?.status || 503).json({ 
+            error: 'Failed to make predictions', 
+            details: error.message,
+            mlError: mlError,
+            detail: mlError.detail || mlError.error || error.message
+        });
+    }
+});
+
+/**
+ * Proxy delete model
+ */
+app.delete('/api/ml/models/:modelId', async (req, res) => {
+    try {
+        const { modelId } = req.params;
+        const { userId } = req.query;
+        if (!userId) return res.status(400).json({ error: 'userId required' });
+        
+        const response = await axios.delete(`${ML_SERVICE_URL}/models/${modelId}`, { params: { userId } });
+        res.json(response.data);
+    } catch (error) {
+        console.error('Failed to delete model:', error.message);
+        res.status(503).json({ error: 'Failed to delete model from ML service' });
+    }
+});
 
 /**
  * Computes the most recent scheduled "tick" (<= now) for a given schedule.

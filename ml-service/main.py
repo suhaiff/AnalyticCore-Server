@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression, LinearRegression
@@ -142,6 +142,7 @@ def _meta_path(model_id: str) -> str:
 
 # ── Models ────────────────────────────────────────────────────────────────
 class TrainResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     model_id: str
     algorithm: str
     problem_type: str
@@ -153,10 +154,12 @@ class TrainResponse(BaseModel):
 
 
 class PredictResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     model_id: str
     row_count: int
     predictions: List[Any]
     probabilities: Optional[List[List[float]]] = None
+    input_data: List[Dict[str, Any]]
 
 
 # ── Routes ────────────────────────────────────────────────────────────────
@@ -320,12 +323,36 @@ async def predict(
         except Exception:
             probs = None
 
+    # Replace NaNs with empty string for JSON serialization
+    input_data = df.fillna("").to_dict(orient="records")
+
     return PredictResponse(
         model_id=model_id,
         row_count=len(preds),
         predictions=preds,
         probabilities=probs,
+        input_data=input_data,
     )
+
+
+@app.get("/models")
+def list_models():
+    """List all available models for optional userId filtering."""
+    try:
+        models = []
+        for filename in os.listdir(MODELS_DIR):
+            if filename.endswith(".json"):
+                model_id = filename[:-5]  # Remove .json extension
+                meta_p = _meta_path(model_id)
+                try:
+                    with open(meta_p, "r", encoding="utf-8") as f:
+                        model_data = json.load(f)
+                        models.append(model_data)
+                except Exception as e:
+                    print(f"Error reading model {model_id}: {e}")
+        return models
+    except Exception as e:
+        raise HTTPException(500, f"Failed to list models: {str(e)}")
 
 
 @app.get("/models/{model_id}")
@@ -335,6 +362,7 @@ def get_model_info(model_id: str):
         raise HTTPException(404, f"Model '{model_id}' not found.")
     with open(meta_p, "r", encoding="utf-8") as f:
         return json.load(f)
+
 
 
 @app.delete("/models/{model_id}")
