@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  # Python ML Service
+  ml-service:
+    build: ./ml-service
+    restart: unless-stopped
+    volumes:
+      - ml_models:/app/models_store
+    networks:
+      - backend
+    # No ports exposed - internal only
+
+  # Node.js Server
+  server:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      - ML_SERVICE_URL=http://ml-service:8001
+    volumes:
+      - ./uploads:/app/uploads
+    depends_on:
+      - ml-service
+    networks:
+      - backend
+
+volumes:
+  ml_models:
+    driver: local
+
+networks:
+  backend:
+    driver: bridge

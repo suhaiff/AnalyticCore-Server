@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+*.joblib
+models_store/
+.env
