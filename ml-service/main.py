@@ -16,7 +16,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
 
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, VotingRegressor
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.model_selection import train_test_split
@@ -68,6 +68,83 @@ def _read_tabular(data: bytes, filename: str = "") -> pd.DataFrame:
             raise HTTPException(400, f"Could not parse file as CSV or Excel: {exc}")
 
 
+def _smart_preprocess(X: pd.DataFrame) -> pd.DataFrame:
+    """
+    Smart preprocessing that handles common data issues:
+    1. Converts numeric-looking string columns to actual numbers
+    2. Converts date-like columns to useful numeric features (year, month, day, etc.)
+    3. Drops high-cardinality categorical columns that would produce useless one-hot features
+    """
+    X = X.copy()
+    cols_to_drop = []
+    cols_to_add = {}
+
+    for col in X.columns:
+        # 1. Try to convert string columns to numeric
+        if X[col].dtype == "object":
+            try:
+                converted = pd.to_numeric(X[col], errors="coerce")
+                # If at least 80% of values converted successfully, treat as numeric
+                if converted.notna().mean() >= 0.8:
+                    X[col] = converted
+                    continue
+            except Exception:
+                pass
+
+        # 2. Try to detect and convert date-like columns
+        if X[col].dtype == "object":
+            col_lower = col.lower().strip()
+            # Check column name for date hints
+            date_hints = ["date", "time", "timestamp", "datetime", "period", "day", "month", "year"]
+            is_date_name = any(hint in col_lower for hint in date_hints)
+
+            # Also try parsing values to see if they look like dates
+            is_date_values = False
+            if not is_date_name:
+                try:
+                    sample = X[col].dropna().head(5)
+                    if len(sample) > 0:
+                        parsed = pd.to_datetime(sample, errors="coerce", infer_datetime_format=True)
+                        if parsed.notna().mean() >= 0.8:
+                            is_date_values = True
+                except Exception:
+                    pass
+
+            if is_date_name or is_date_values:
+                try:
+                    dt = pd.to_datetime(X[col], errors="coerce", infer_datetime_format=True)
+                    if dt.notna().mean() >= 0.5:
+                        # Extract useful numeric features from date
+                        cols_to_add[f"{col}_year"] = dt.dt.year.fillna(0).astype(float)
+                        cols_to_add[f"{col}_month"] = dt.dt.month.fillna(0).astype(float)
+                        cols_to_add[f"{col}_day"] = dt.dt.day.fillna(0).astype(float)
+                        cols_to_add[f"{col}_dayofweek"] = dt.dt.dayofweek.fillna(0).astype(float)
+                        cols_to_add[f"{col}_dayofyear"] = dt.dt.dayofyear.fillna(0).astype(float)
+                        # Convert to ordinal (days since epoch) for continuous value
+                        epoch = pd.Timestamp("1970-01-01")
+                        cols_to_add[f"{col}_ordinal"] = (dt - epoch).dt.days.fillna(0).astype(float)
+                        cols_to_drop.append(col)
+                        continue
+                except Exception:
+                    pass
+
+        # 3. Drop high-cardinality categorical columns (would produce useless one-hot features)
+        if X[col].dtype == "object":
+            n_unique = X[col].nunique(dropna=True)
+            n_rows = len(X)
+            # If more than 50% of values are unique, it's essentially an ID/text column
+            if n_rows > 0 and n_unique / n_rows > 0.5 and n_unique > 20:
+                cols_to_drop.append(col)
+
+    # Apply changes
+    if cols_to_drop:
+        X = X.drop(columns=cols_to_drop, errors="ignore")
+    for new_col, values in cols_to_add.items():
+        X[new_col] = values
+
+    return X
+
+
 def _infer_problem_type(y: pd.Series, forced: Optional[str]) -> str:
     # Hard cap: classification on a continuous numeric target with many unique
     # values creates unusably-large models and almost never reflects user intent.
@@ -85,7 +162,7 @@ def _infer_problem_type(y: pd.Series, forced: Optional[str]) -> str:
     return "regression"
 
 
-def _build_pipeline(algorithm: str, X: pd.DataFrame) -> Pipeline:
+def _build_pipeline(algorithm: str, X: pd.DataFrame, problem_type: str = "regression") -> Pipeline:
     if algorithm not in ALLOWED_ALGORITHMS:
         raise HTTPException(400, f"Unsupported algorithm '{algorithm}'.")
 
@@ -111,6 +188,21 @@ def _build_pipeline(algorithm: str, X: pd.DataFrame) -> Pipeline:
         model = model_cls(max_iter=1000, n_jobs=-1)
     else:
         model = model_cls(random_state=42) if "random_state" in model_cls().get_params() else model_cls()
+
+    # For tree-based regression, blend with LinearRegression via VotingRegressor.
+    # Tree models cannot extrapolate beyond their training data range — when
+    # prediction inputs exceed training values, all rows land in the same leaf
+    # node and produce identical predictions.  A LinearRegression component
+    # provides the extrapolation capability while the tree captures non-linear
+    # patterns within range.
+    _tree_regressors = {"random_forest_regressor", "decision_tree_regressor"}
+    if problem_type == "regression" and algorithm in _tree_regressors:
+        lr = LinearRegression()
+        ensemble = VotingRegressor(
+            estimators=[("tree", model), ("lr", lr)],
+            weights=[0.6, 0.4],
+        )
+        return Pipeline([("preprocessor", preprocessor), ("model", ensemble)])
 
     return Pipeline([("preprocessor", preprocessor), ("model", model)])
 
@@ -151,6 +243,8 @@ class TrainResponse(BaseModel):
     metrics: Dict[str, float]
     created_at: str
     sample_size: int
+    updated_at: Optional[str] = None
+    name: Optional[str] = None
 
 
 class PredictResponse(BaseModel):
@@ -187,6 +281,7 @@ async def train(
     problem_type: Optional[str] = Form(None),  # 'classification' | 'regression'
     test_size: float = Form(0.2),
     model_id: Optional[str] = Form(None),
+    name: Optional[str] = Form(None),
 ):
     raw = await file.read()
     df = _read_tabular(raw, file.filename or "")
@@ -215,6 +310,14 @@ async def train(
     X = df[feats].copy()
     y = df[target_column].copy()
 
+    # Save original (raw) feature columns before preprocessing
+    raw_feats = list(feats)
+
+    # Smart preprocessing: handle dates, numeric coercion, high-cardinality drops
+    X = _smart_preprocess(X)
+    # Update feature list to reflect preprocessed columns
+    feats = list(X.columns)
+
     # Fill simple NaNs so sklearn doesn't fail
     for c in X.columns:
         if X[c].dtype.kind in ("i", "u", "f"):
@@ -238,7 +341,7 @@ async def train(
     if (ptype == "classification") != algo_is_classifier:
         algorithm = _counterpart.get(algorithm, algorithm)
 
-    pipeline = _build_pipeline(algorithm, X)
+    pipeline = _build_pipeline(algorithm, X, problem_type=ptype)
 
     # Stratify for classification if possible
     stratify = y if (ptype == "classification" and y.nunique() > 1 and (y.value_counts().min() >= 2)) else None
@@ -256,7 +359,19 @@ async def train(
     metrics = _compute_metrics(ptype, y_test, y_pred)
 
     mid = model_id or str(uuid.uuid4())
+
+    # Check if this is a retrain (model_id already exists) — read before overwriting
+    existing_meta = None
+    if model_id and os.path.exists(_meta_path(mid)):
+        try:
+            with open(_meta_path(mid), "r", encoding="utf-8") as f:
+                existing_meta = json.load(f)
+        except Exception:
+            existing_meta = None
+
     joblib.dump(pipeline, _model_path(mid))
+
+    now_iso = datetime.utcnow().isoformat()
 
     meta = {
         "model_id": mid,
@@ -264,10 +379,18 @@ async def train(
         "problem_type": ptype,
         "target_column": target_column,
         "feature_columns": feats,
+        "raw_feature_columns": raw_feats,
         "metrics": metrics,
-        "sample_size": int(len(df)),
-        "created_at": datetime.utcnow().isoformat(),
+        "sample_size": int(len(df)) + (existing_meta.get("sample_size", 0) if existing_meta else 0),
+        "created_at": existing_meta.get("created_at", now_iso) if existing_meta else now_iso,
+        "updated_at": now_iso,
     }
+    # Preserve the model name
+    if name:
+        meta["name"] = name
+    elif existing_meta and existing_meta.get("name"):
+        meta["name"] = existing_meta["name"]
+
     with open(_meta_path(mid), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
@@ -295,18 +418,37 @@ async def predict(
     if os.path.exists(meta_p):
         with open(meta_p, "r", encoding="utf-8") as f:
             meta = json.load(f)
-        feats = meta.get("feature_columns", list(df.columns))
-        missing = [c for c in feats if c not in df.columns]
-        if missing:
+
+        # raw_feature_columns = original columns before preprocessing
+        # feature_columns = preprocessed columns the model actually uses
+        raw_feats = meta.get("raw_feature_columns", meta.get("feature_columns", list(df.columns)))
+        processed_feats = meta.get("feature_columns", raw_feats)
+
+        # Check that the raw columns exist in the prediction file
+        available_raw = [c for c in raw_feats if c in df.columns]
+        if not available_raw:
             raise HTTPException(
                 400,
-                f"Prediction file missing required columns: {missing}. "
+                f"Prediction file missing required columns. "
                 f"File contains: {list(df.columns)}. "
-                f"Model expects: {feats}.",
+                f"Model expects: {raw_feats}.",
             )
-        X = df[feats].copy()
+
+        X = df[available_raw].copy()
+
+        # Apply same smart preprocessing as training
+        X = _smart_preprocess(X)
+
+        # Ensure all expected processed columns exist (add missing ones as 0)
+        for col in processed_feats:
+            if col not in X.columns:
+                X[col] = 0.0
+
+        # Keep only the columns the model expects, in the right order
+        X = X[[c for c in processed_feats if c in X.columns]]
     else:
         X = df.copy()
+        X = _smart_preprocess(X)
 
     # Fill NaNs similar to training
     for c in X.columns:

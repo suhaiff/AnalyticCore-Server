@@ -2715,6 +2715,7 @@ app.post('/api/ml/train', upload.single('file'), async (req, res) => {
         if (req.body.problemType) form.append('problem_type', req.body.problemType);
         if (req.body.testSize) form.append('test_size', req.body.testSize);
         if (req.body.modelId) form.append('model_id', req.body.modelId);
+        if (req.body.name) form.append('name', req.body.name);
         
         const response = await axios.post(`${ML_SERVICE_URL}/train`, form, {
             headers: form.getHeaders(),
