@@ -1,0 +1,18 @@
+{
+  "model_id": "03dbb66f-898e-4ede-9277-8df9678022f0",
+  "algorithm": "random_forest_regressor",
+  "problem_type": "regression",
+  "target_column": "Profit",
+  "feature_columns": [
+    "Region",
+    "Product",
+    "Category"
+  ],
+  "metrics": {
+    "r2": 0.3373188630200453,
+    "mae": 2730.014513906926,
+    "rmse": 4296.341140093369
+  },
+  "sample_size": 100,
+  "created_at": "2026-04-24T12:43:34.079041"
+}

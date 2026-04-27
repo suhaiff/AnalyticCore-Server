@@ -16,6 +16,7 @@ const sharepointService = require('./sharepointService');
 const sharepointOAuthService = require('./sharepointOAuthService');
 const dbConnectorService = require('./dbConnectorService');
 const sqlParserService = require('./sqlParserService');
+const setupMLRoutes = require('./mlRoutes');
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -2199,6 +2200,10 @@ app.post('/api/sql-db/refresh/:fileId', async (req, res) => {
 // ============================================
 // Admin: API Error Log Endpoints
 // ============================================
+// Initialize ML Routes
+console.log('Initializing ML routes...');
+console.log(`ML Service URL: ${process.env.ML_SERVICE_URL || 'http://localhost:8001'}`);
+setupMLRoutes(app);
 
 /**
  * Report an API key error (called from frontend when Gemini calls fail)
