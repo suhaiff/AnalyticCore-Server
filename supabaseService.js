@@ -47,6 +47,39 @@ class SupabaseService {
         }
     }
 
+    async getUserById(id) {
+        try {
+            const { data, error } = await this.supabase
+                .from('users')
+                .select('*')
+                .eq('id', id)
+                .single();
+
+            if (error && error.code === 'PGRST116') return null;
+            if (error) throw error;
+            return data;
+        } catch (error) {
+            console.error('Error fetching user by id:', error.message);
+            throw error;
+        }
+    }
+
+    async getUsersByIds(ids) {
+        if (!ids || ids.length === 0) return [];
+        try {
+            const { data, error } = await this.supabase
+                .from('users')
+                .select('*')
+                .in('id', ids);
+
+            if (error) throw error;
+            return data;
+        } catch (error) {
+            console.error('Error fetching users by ids:', error.message);
+            throw error;
+        }
+    }
+
     async getUserByEmail(email) {
         try {
             const { data, error } = await this.supabase
@@ -175,6 +208,51 @@ class SupabaseService {
             return true;
         } catch (error) {
             console.error('Error updating user password by email:', error.message);
+            throw error;
+        }
+    }
+
+    async updateUserSuperuser(userId, isSuperuser) {
+        try {
+            const { error } = await this.supabase
+                .from('users')
+                .update({ is_superuser: isSuperuser })
+                .eq('id', userId);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error updating user superuser status:', error.message);
+            throw error;
+        }
+    }
+
+    async updateUserPricing(userId, pricing) {
+        try {
+            const { error } = await this.supabase
+                .from('users')
+                .update({ pricing: pricing })
+                .eq('id', userId);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error updating user pricing:', error.message);
+            throw error;
+        }
+    }
+
+    async updateUserDuration(userId, duration) {
+        try {
+            const { error } = await this.supabase
+                .from('users')
+                .update({ duration: duration })
+                .eq('id', userId);
+
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error updating user duration:', error.message);
             throw error;
         }
     }
@@ -921,6 +999,21 @@ class SupabaseService {
             return folder;
         } catch (error) {
             console.error('Error creating workspace folder:', error.message);
+            throw error;
+        }
+    }
+
+    async getWorkspaceFolderMembers(folderId) {
+        try {
+            const { data, error } = await this.supabase
+                .from('workspace_folder_access')
+                .select('user_id, access_level')
+                .eq('folder_id', folderId);
+            
+            if (error) throw error;
+            return data;
+        } catch (error) {
+            console.error('Error fetching workspace folder members:', error.message);
             throw error;
         }
     }

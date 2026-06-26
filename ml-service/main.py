@@ -426,13 +426,18 @@ async def predict(
 
         # Check that the raw columns exist in the prediction file
         available_raw = [c for c in raw_feats if c in df.columns]
+        missing_raw = [c for c in raw_feats if c not in df.columns]
+        
         if not available_raw:
             raise HTTPException(
                 400,
-                f"Prediction file missing required columns. "
-                f"File contains: {list(df.columns)}. "
+                f"Prediction file missing all required features. "
                 f"Model expects: {raw_feats}.",
             )
+            
+        # Inform about partially missing columns but continue if possible (filled with 0)
+        if missing_raw:
+            print(f"⚠️ Prediction input missing columns: {missing_raw}. These will be filled with 0.")
 
         X = df[available_raw].copy()
 
@@ -446,6 +451,11 @@ async def predict(
 
         # Keep only the columns the model expects, in the right order
         X = X[[c for c in processed_feats if c in X.columns]]
+        
+        # Explicitly remove target column from output data to avoid confusion
+        target_col = meta.get("target_column")
+        if target_col and target_col in df.columns:
+            df = df.drop(columns=[target_col])
     else:
         X = df.copy()
         X = _smart_preprocess(X)

@@ -143,6 +143,100 @@ class BrevoService {
 </html>`;
         return this.sendEmail(toEmail, toName, subject, htmlContent);
     }
+    async sendWorkspaceCreatedEmail(toEmail, toName, workspaceName) {
+        const subject = '🚀 Your New Workspace is Ready — InsightAI';
+        const htmlContent = `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background-color:#0f172a;font-family:'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
+    <div style="max-width:520px;margin:40px auto;background:linear-gradient(135deg,#1e293b 0%,#0f172a 100%);border-radius:24px;overflow:hidden;border:1px solid rgba(99,102,241,0.2);box-shadow:0 25px 50px -12px rgba(0,0,0,0.5);">
+        <!-- Header -->
+        <div style="background:linear-gradient(135deg,#6366f1 0%,#8b5cf6 100%);padding:40px 32px;text-align:center;">
+            <div style="width:56px;height:56px;background:rgba(255,255,255,0.2);border-radius:16px;display:inline-flex;align-items:center;justify-content:center;margin-bottom:16px;">
+                <span style="font-size:28px;">🚀</span>
+            </div>
+            <h1 style="color:#ffffff;font-size:24px;font-weight:800;margin:0;letter-spacing:-0.5px;">Workspace Created</h1>
+            <p style="color:rgba(255,255,255,0.8);font-size:14px;margin:8px 0 0;">Start collaborating on your data insights</p>
+        </div>
+        <!-- Body -->
+        <div style="padding:32px;">
+            <p style="color:#cbd5e1;font-size:15px;line-height:1.6;margin:0 0 24px;">
+                Hi <strong style="color:#e2e8f0;">${toName || 'there'}</strong>,
+            </p>
+            <p style="color:#cbd5e1;font-size:15px;line-height:1.6;margin:0 0 24px;">
+                Great news! Your new workspace <strong style="color:#6366f1;">"${workspaceName}"</strong> has been successfully created. You can now start adding dashboards, inviting team members, and automating your analytics.
+            </p>
+            <!-- CTA -->
+            <div style="text-align:center;margin:32px 0;">
+                <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}" style="background:linear-gradient(135deg,#6366f1 0%,#8b5cf6 100%);color:#ffffff;padding:16px 32px;border-radius:12px;text-decoration:none;font-weight:700;display:inline-block;box-shadow:0 10px 15px -3px rgba(99,102,241,0.3);">Launch Workspace</a>
+            </div>
+            <p style="color:#64748b;font-size:13px;line-height:1.6;margin:0;">
+                Ready to transform your data? If you have any questions, our support team is just a reply away.
+            </p>
+        </div>
+        <!-- Footer -->
+        <div style="border-top:1px solid rgba(99,102,241,0.15);padding:20px 32px;text-align:center;">
+            <p style="color:#475569;font-size:12px;margin:0;">© ${new Date().getFullYear()} InsightAI — Powered by AnalyticCore</p>
+        </div>
+    </div>
+</body>
+</html>`;
+        return this.sendEmail(toEmail, toName, subject, htmlContent);
+    }
+
+    async sendWorkspaceInviteEmail(toEmail, toName, workspaceName, inviterName, accessLevel) {
+        const subject = `💼 Invitation to join "${workspaceName}" — InsightAI`;
+        const htmlContent = `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background-color:#0f172a;font-family:'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
+    <div style="max-width:520px;margin:40px auto;background:linear-gradient(135deg,#1e293b 0%,#0f172a 100%);border-radius:24px;overflow:hidden;border:1px solid rgba(99,102,241,0.2);box-shadow:0 25px 50px -12px rgba(0,0,0,0.5);">
+        <!-- Header -->
+        <div style="background:linear-gradient(135deg,#6366f1 0%,#8b5cf6 100%);padding:40px 32px;text-align:center;">
+            <div style="width:56px;height:56px;background:rgba(255,255,255,0.2);border-radius:16px;display:inline-flex;align-items:center;justify-content:center;margin-bottom:16px;">
+                <span style="font-size:28px;">💼</span>
+            </div>
+            <h1 style="color:#ffffff;font-size:24px;font-weight:800;margin:0;letter-spacing:-0.5px;">Workspace Invitation</h1>
+            <p style="color:rgba(255,255,255,0.8);font-size:14px;margin:8px 0 0;">You've been invited to collaborate</p>
+        </div>
+        <!-- Body -->
+        <div style="padding:32px;">
+            <p style="color:#cbd5e1;font-size:15px;line-height:1.6;margin:0 0 24px;">
+                Hi <strong style="color:#e2e8f0;">${toName || 'there'}</strong>,
+            </p>
+            <p style="color:#cbd5e1;font-size:15px;line-height:1.6;margin:0 0 24px;">
+                <strong style="color:#e2e8f0;">${inviterName}</strong> has invited you to join the workspace <strong style="color:#6366f1;">"${workspaceName}"</strong> as a <strong style="color:#fbbf24;">${accessLevel}</strong>.
+            </p>
+            <!-- Access Badge -->
+            <div style="background:rgba(255,255,255,0.05);border-radius:16px;padding:20px;text-align:center;margin-bottom:24px;border:1px dashed rgba(255,255,255,0.1);">
+                <p style="color:#94a3b8;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin:0 0 8px;">Your Access Level</p>
+                <p style="color:#ffffff;font-size:18px;font-weight:700;margin:0;">${accessLevel}</p>
+            </div>
+            <!-- CTA -->
+            <div style="text-align:center;margin:32px 0;">
+                <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}" style="background:linear-gradient(135deg,#6366f1 0%,#8b5cf6 100%);color:#ffffff;padding:16px 32px;border-radius:12px;text-decoration:none;font-weight:700;display:inline-block;box-shadow:0 10px 15px -3px rgba(99,102,241,0.3);">View Workspace</a>
+            </div>
+            <p style="color:#64748b;font-size:13px;line-height:1.6;margin:0;">
+                Log in to your InsightAI account to accept the invitation and start collaborating.
+            </p>
+        </div>
+        <!-- Footer -->
+        <div style="border-top:1px solid rgba(99,102,241,0.15);padding:20px 32px;text-align:center;">
+            <p style="color:#475569;font-size:12px;margin:0;">© ${new Date().getFullYear()} InsightAI — Powered by AnalyticCore</p>
+        </div>
+    </div>
+</body>
+</html>`;
+        return this.sendEmail(toEmail, toName, subject, htmlContent);
+    }
 }
 
 module.exports = new BrevoService();

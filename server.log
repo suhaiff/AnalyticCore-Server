@@ -1,14 +1,51 @@
-nohup: ignoring input
-
-> insightai-server@1.0.0 start
-> node index.js
-
-[dotenv@17.2.3] injecting env (18) from ../.env -- tip: ⚙️  specify custom .env file path with { path: '/custom/path/.env' }
+[dotenv@17.2.3] injecting env (18) from .env -- tip: 🗂️ backup and recover secrets: https://dotenvx.com/ops
 ✓ Supabase client initialized successfully
+⚠️  BREVO_API_KEY not set. Email sending will not work.
 Starting server with Supabase integration...
-Initializing ML routes...
-ML Service URL: http://localhost:8001
+⏰ Scheduled refresh engine started (polling every 30s)
 Server running on port 3001 with Supabase integration
 Supabase Configuration:
   Project URL: https://lueqkftnwavumkvtivdn.supabase.co
-Killed
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:06:13.352Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:06:42.833Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:07:12.826Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:07:42.842Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:08:12.868Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:08:42.882Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:09:12.914Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:09:42.925Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:10:12.963Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:10:43.006Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:11:13.031Z
+📡 [Incoming Request] GET /api/admin/api-errors/count
+📡 [Incoming Request] PUT /api/users/2/pricing
+📡 [Incoming Request] GET /api/admin/api-errors/count
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:11:43.013Z
+📡 [Incoming Request] GET /api/admin/api-errors/count
+📡 [Incoming Request] PUT /api/users/2/duration
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:12:12.865Z
+📡 [Incoming Request] PUT /api/users/2/duration
+📡 [Incoming Request] PUT /api/users/2/duration
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:12:42.992Z
+📡 [Incoming Request] POST /api/login
+📡 [Incoming Request] GET /api/dashboards?userId=2
+📡 [Incoming Request] GET /api/workspace/folders?userId=2
+📡 [Incoming Request] GET /api/users
+📡 [Incoming Request] GET /api/users
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:13:12.922Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:13:43.088Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:14:13.092Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:14:43.107Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:15:13.168Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:15:43.122Z
+📡 [Incoming Request] GET /api/dashboards?userId=2
+📡 [Incoming Request] GET /api/workspace/folders?userId=2
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:16:13.503Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:16:43.177Z
+📡 [Incoming Request] GET /api/users
+📡 [Incoming Request] GET /api/users
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:17:13.173Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:17:43.251Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:18:13.223Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:18:43.295Z
+⏰ [Scheduler] Polled 0 active schedule(s) at 2026-04-28T08:19:13.312Z
