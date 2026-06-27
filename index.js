@@ -13,6 +13,8 @@ const supabaseService = require('./supabaseService');
 const brevoService = require('./brevoService');
 const googleSheetsService = require('./googleSheetsService');
 const sharepointService = require('./sharepointService');
+const cloudStorageRoutes = require('./cloudStorageRoutes');
+const dataWarehouseRoutes = require('./dataWarehouseRoutes');
 const sharepointOAuthService = require('./sharepointOAuthService');
 const dbConnectorService = require('./dbConnectorService');
 const sqlParserService = require('./sqlParserService');
@@ -835,6 +837,12 @@ app.delete('/api/workspace/groups/:id', async (req, res) => {
     }
 });
 
+
+// Cloud Storage Routes
+app.use('/api/cloud-storage', cloudStorageRoutes);
+
+// Data Warehouse Routes
+app.use('/api/data-warehouse', dataWarehouseRoutes);
 
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     if (!req.file) {
