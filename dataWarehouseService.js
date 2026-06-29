@@ -47,15 +47,22 @@ class DataWarehouseService {
     // ==========================================
     _getSnowflakeConnection(config) {
         return new Promise((resolve, reject) => {
+            const timeoutId = setTimeout(() => {
+                reject(new Error('Connection timed out. Please check your account identifier and network connection.'));
+            }, 15000);
+
             const connection = snowflake.createConnection({
                 account: config.account,
                 username: config.username,
                 password: config.password,
                 warehouse: config.warehouse,
                 database: config.database,
-                schema: config.schema || 'PUBLIC'
+                schema: config.schema || 'PUBLIC',
+                timeout: 10000,
+                clientSessionKeepAlive: false
             });
             connection.connect((err, conn) => {
+                clearTimeout(timeoutId);
                 if (err) reject(err);
                 else resolve(conn);
             });
