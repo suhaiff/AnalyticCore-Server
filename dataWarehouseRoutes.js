@@ -29,36 +29,64 @@ router.post('/tables', async (req, res) => {
 router.post('/import', async (req, res) => {
     try {
         const { userId, engine, config, tableNames, title } = req.body;
-        const importedTables = [];
+        // 1. Create file record in Supabase once (represents the connection/import set)
+        const sourceInfo = {
+            type: 'data_warehouse',
+            tables: tableNames, // Store all tables in metadata
+            engine: engine,
+            config: config,
+            refreshMode: 'manual',
+            lastRefresh: new Date().toISOString()
+        };
 
-        for (const tableName of tableNames) {
-            const result = await dwService.importTable(engine, config, tableName);
-            importedTables.push(result);
-        }
-        
-        // Emulate the SQL Database saving behavior to Supabase
-        const uploadsDir = path.join(__dirname, 'uploads');
-        if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
-        
-        const fileId = Date.now().toString() + '_' + Math.floor(Math.random() * 1000);
-        const fileName = `${title || engine}_${fileId}.sql_dump`;
-        const filePath = path.join(uploadsDir, fileName);
-        
-        // Write a dummy file to pass the upload check
-        fs.writeFileSync(filePath, JSON.stringify(importedTables));
-
-        await supabaseService.uploadSqlFile(
-            userId,
-            fileName,
-            fileName,
-            filePath,
+        const fileId = await supabaseService.createFile(
+            parseInt(userId),
+            title || `${engine.toUpperCase()}_Import`,
             'application/json',
-            fs.statSync(filePath).size
+            0, // Size
+            tableNames.length, // Total sheets
+            sourceInfo
         );
-        
-        // Save table contents logic (simulated for now, similar to index.js sql upload flow)
-        // Here we just return the processed tables for frontend to render directly
-        res.json({ tables: importedTables, title: title || `${engine} Import` });
+
+        // 2. Process each table
+        const importedTables = [];
+        for (let i = 0; i < tableNames.length; i++) {
+            const tableName = tableNames[i];
+            const result = await dwService.importTable(engine, config, tableName);
+            
+            if (result.data && result.data.length > 0) {
+                const columnCount = result.data[0].length;
+                
+                // Create sheet for this table
+                const sheetId = await supabaseService.createSheet(
+                    fileId,
+                    tableName,
+                    i,
+                    result.data.length,
+                    columnCount
+                );
+
+                // Insert row data in batches
+                const batchSize = 500;
+                for (let j = 0; j < result.data.length; j += batchSize) {
+                    const batchData = result.data.slice(j, j + batchSize);
+                    const insertRows = batchData.map((row, idx) => ({
+                        rowIndex: j + idx,
+                        rowData: row
+                    }));
+                    await supabaseService.createExcelDataBatch(sheetId, insertRows);
+                }
+
+                importedTables.push({
+                    id: sheetId,
+                    name: tableName,
+                    data: result.data,
+                    fileId: fileId
+                });
+            }
+        }
+
+        res.json({ tables: importedTables, title: title || `${engine.toUpperCase()} Import` });
 
     } catch (error) {
         res.status(400).json({ error: error.message });
